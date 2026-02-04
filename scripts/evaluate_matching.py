@@ -93,5 +93,5 @@ if __name__ == "__main__":
     evaluate_matcher(
         corpus_file="data/eval/corpus.jsonl",
         queries_file="data/eval/queries.jsonl",
-        model_name="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2" # Model nhẹ hơn để test nhanh
+        model_name="tfidf-char-ngram" 
     )
