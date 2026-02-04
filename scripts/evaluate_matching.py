@@ -4,7 +4,7 @@ import os
 from tqdm import tqdm
 from src.matching.matcher import CompanyMatcher
 
-def evaluate_matcher(corpus_file, queries_file, model_name='BAAI/bge-m3'):
+def evaluate_matcher(corpus_file, queries_file, model_name='BAAI/bge-m3', remove_stopwords=True):
     """
     Đánh giá độ chính xác của thuật toán matching trên dataset đã sinh.
     """
@@ -33,7 +33,7 @@ def evaluate_matcher(corpus_file, queries_file, model_name='BAAI/bge-m3'):
     print(f"Bắt đầu đánh giá với {len(corpus)} cty và {len(queries)} query mẫu...")
 
     # 3. Build Matcher (Sử dụng model nhỏ hơn hoặc cache nếu cần, ở đây dùng mặc định)
-    matcher = CompanyMatcher(model_name=model_name)
+    matcher = CompanyMatcher(model_name=model_name, remove_stopwords=remove_stopwords)
     matcher.build_index(corpus)
 
     # 4. Run Evaluation
@@ -77,6 +77,7 @@ def evaluate_matcher(corpus_file, queries_file, model_name='BAAI/bge-m3'):
     print("KẾT QUẢ ĐÁNH GIÁ")
     print("="*30)
     print(f"Model: {model_name}")
+    print(f"Remove Stopwords: {remove_stopwords}")
     print(f"Tổng số queries: {len(queries)}")
     print(f"Số lỗi (Top 1): {len(results_analysis)}")
     print(f"Accuracy (Top 1): {accuracy:.2%}")
@@ -93,8 +94,42 @@ def evaluate_matcher(corpus_file, queries_file, model_name='BAAI/bge-m3'):
             print(f"  Predicted: {err['predicted_top1']} (Score: {err['score']:.4f})")
 
 if __name__ == "__main__":
+    # Test với TF-IDF (Có loại stopword)
+    print("\n" + "="*50)
+    print("--- Testing TF-IDF (Remove Stopwords: True) ---")
     evaluate_matcher(
         corpus_file="data/eval/corpus.jsonl",
         queries_file="data/eval/queries.jsonl",
-        model_name="tfidf-char-ngram" 
+        model_name="tfidf",
+        remove_stopwords=True
+    )
+
+    # Test với TF-IDF (KHÔNG loại stopword)
+    print("\n" + "="*50)
+    print("--- Testing TF-IDF (Remove Stopwords: False) ---")
+    evaluate_matcher(
+        corpus_file="data/eval/corpus.jsonl",
+        queries_file="data/eval/queries.jsonl",
+        model_name="tfidf",
+        remove_stopwords=False
+    )
+
+    # Test với WordLlama l2 (Có loại stopword)
+    print("\n" + "="*50)
+    print("--- Testing WordLlama L2 (Remove Stopwords: True) ---")
+    evaluate_matcher(
+        corpus_file="data/eval/corpus.jsonl",
+        queries_file="data/eval/queries.jsonl",
+        model_name="wordllama-l2",
+        remove_stopwords=True
+    )
+
+    # Test với WordLlama l2 (KHÔNG loại stopword)
+    print("\n" + "="*50)
+    print("--- Testing WordLlama L2 (Remove Stopwords: False) ---")
+    evaluate_matcher(
+        corpus_file="data/eval/corpus.jsonl",
+        queries_file="data/eval/queries.jsonl",
+        model_name="wordllama-l2",
+        remove_stopwords=False
     )
