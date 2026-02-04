@@ -40,7 +40,7 @@ def run_evaluation_dataset_generation(input_file, output_queries_file, output_co
 
         # 2. Sinh bằng LLM (Chọn lọc, thông minh hơn - ví dụ 1 batch 10 cty)
         # Để tiết kiệm, ở bản demo này ta chỉ sinh LLM cho 2 công ty đầu tiên
-        if idx < 2:
+        if idx < 20:
             llm_results = llm_gen.generate_variants([name])
             # Giả định llm_results trả về đúng format [ { "original": ..., "variations": [ { "text": ..., "type": ... } ] } ]
             if isinstance(llm_results, list) and len(llm_results) > 0:

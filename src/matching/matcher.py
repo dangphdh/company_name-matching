@@ -9,7 +9,12 @@ class CompanyMatcher:
         Khởi tạo mô hình TF-IDF (Sử dụng scikit-learn để tránh lỗi native DLL trên Windows).
         """
         print(f"Using Pure Python/Sklearn TF-IDF Matcher...")
-        self.vectorizer = TfidfVectorizer(analyzer='char_wb', ngram_range=(2, 4))
+        self.vectorizer = TfidfVectorizer(
+            analyzer='char', 
+            ngram_range=(2, 5),
+            sublinear_tf=True,
+            min_df=1
+        )
         self.index = None
         self.corpus_names = []
         self.corpus_vectors = None

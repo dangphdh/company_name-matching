@@ -4,18 +4,29 @@ from src.preprocess import remove_accents
 class CombinatorialGenerator:
     def __init__(self):
         # Từ điển các biến thể của loại hình doanh nghiệp và các cụm từ phổ biến
+        # Bao gồm cả bản có dấu và không dấu để thay thế triệt để
         self.type_variants = {
-            "công ty tnhh mtv": ["tnhh mtv", "tnhh một thành viên", "tnhh 1tv", "tnhh 1 thành viên"],
-            "công ty tnhh": ["tnhh", "cty tnhh", "co. ltd", "co.,ltd", "trách nhiệm hữu hạn"],
-            "công ty cổ phần": ["cp", "ctcp", "cty cp", "jsc", "cổ phần"],
-            "tập đoàn": ["group", "tđ", "tap doan"],
-            "thương mại dịch vụ": ["tm dv", "tm&dv", "tmdv", "thương mại và dịch vụ", "tm-dv"],
-            "sản xuất thương mại": ["sx tm", "sxtm", "sx & tm", "sản xuất tm", "sx-tm"],
-            "xuất nhập khẩu": ["xnk", "xn-kh", "import export", "imp-exp", "xnk"],
-            "đầu tư xây dựng": ["đt xd", "dtxd", "đt & xd", "đầu tư và xây dựng", "đtxd"],
-            "văn phòng đại diện": ["vpđd", "vpdd", "rep office", "văn phòng đd"],
+            "công ty tnhh mtv": ["tnhh mtv", "tnhh một thành viên", "tnhh 1tv", "tnhh 1 thành viên", "cong ty tnhh mtv", "tnhh mot thanh vien"],
+            "cong ty tnhh mtv": ["tnhh mtv", "tnhh 1tv", "tnhh 1 thanh vien"],
+            "công ty tnhh": ["tnhh", "cty tnhh", "co. ltd", "co.,ltd", "trách nhiệm hữu hạn", "cong ty tnhh", "trach nhiem huu han"],
+            "cong ty tnhh": ["tnhh", "cty tnhh", "co. ltd", "co.,ltd"],
+            "công ty cổ phần": ["cp", "ctcp", "cty cp", "jsc", "cổ phần", "cong ty co phan", "co phan"],
+            "cong ty co phan": ["cp", "ctcp", "cty cp", "jsc", "co phan"],
+            "tập đoàn": ["group", "tđ", "tap doan", "tapdoan"],
+            "tap doan": ["group", "tđ", "tapdoan"],
+            "thương mại dịch vụ": ["tm dv", "tm&dv", "tmdv", "thương mại và dịch vụ", "tm-dv", "thuong mai dich vu"],
+            "thuong mai dich vu": ["tm dv", "tmdv", "tm-dv"],
+            "sản xuất thương mại": ["sx tm", "sxtm", "sx & tm", "sản xuất tm", "sx-tm", "san xuat thuong mai"],
+            "san xuat thuong mai": ["sx tm", "sxtm", "sx-tm"],
+            "xuất nhập khẩu": ["xnk", "import export", "imp-exp", "xuat nhap khau"],
+            "xuat nhap khau": ["xnk", "import export"],
+            "đầu tư xây dựng": ["đt xd", "dtxd", "đầu tư và xây dựng", "dau tu xay dung"],
+            "dau tu xay dung": ["đt xd", "dtxd"],
+            "văn phòng đại diện": ["vpđd", "vpdd", "rep office", "van phong dai dien"],
+            "van phong dai dien": ["vpdd", "rep office"],
             "chi nhánh": ["cn", "br", "chi nhanh"],
-            "một thành viên": ["mtv", "1tv", "1 thành viên"]
+            "chi nhanh": ["cn", "br"],
+            "một thành viên": ["mtv", "1tv", "1 thành viên", "mot thanh vien"]
         }
 
     def generate(self, original_name):

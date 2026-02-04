@@ -24,7 +24,7 @@ def evaluate_matcher(corpus_file, queries_file, model_name='BAAI/bge-m3'):
             queries.append(json.loads(line))
 
     # Giới hạn số lượng query nếu quá nhiều (để test nhanh)
-    MAX_QUERIES = 500
+    MAX_QUERIES = 1000
     if len(queries) > MAX_QUERIES:
         import random
         random.seed(42)
@@ -48,14 +48,17 @@ def evaluate_matcher(corpus_file, queries_file, model_name='BAAI/bge-m3'):
         predictions = matcher.search(q['text'], top_k=5)
         
         # Check Top 1
+        is_top1 = False
         if predictions and predictions[0]['company'] == target_name:
             hits += 1
+            is_top1 = True
         
         # Check Top 3
         if any(p['company'] == target_name for p in predictions[:3]):
             top_3_hits += 1
-        else:
-            # Lưu lại case sai để phân tích
+            
+        if not is_top1:
+            # Lưu lại case sai Top 1 để phân tích
             results_analysis.append({
                 "query": q['text'],
                 "method": q['method'],

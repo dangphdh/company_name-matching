@@ -2,43 +2,39 @@ import os
 from src.matching.matcher import CompanyMatcher
 
 def main():
-    # 1. Danh sách công ty "Chuẩn" từ hệ thống
-    system_companies = [
-        "Công ty Cổ phần Sữa Việt Nam",
-        "Ngân hàng Thương mại Cổ phần Ngoại thương Việt Nam",
-        "Tập đoàn Viễn thông Quân đội",
-        "Công ty TNHH Samsung Electronics Việt Nam",
-        "Ngân hàng Thương mại Cổ phần Công thương Việt Nam",
-        "Tổng Công ty Hàng không Việt Nam - CTCP",
-        "Tập đoàn Xăng dầu Việt Nam",
-        "Công ty Cổ phần FPT",
-        "Tập đoàn Vingroup - Công ty CP",
-        "Ngân hàng TMCP Đầu tư và Phát triển Việt Nam"
-    ]
+    # 1. Load danh sách công ty từ file sample_system_names.txt
+    corpus_path = "data/sample_system_names.txt"
+    if not os.path.exists(corpus_path):
+        print(f"Lỗi: Không tìm thấy file {corpus_path}")
+        return
 
-    # 2. Khởi tạo Matcher (Mặc định dùng BGE-M3)
-    matcher = CompanyMatcher(model_name='BAAI/bge-m3')
+    with open(corpus_path, "r", encoding="utf-8") as f:
+        system_companies = [line.strip() for line in f if line.strip()]
+
+    # 2. Khởi tạo Matcher 
+    # Mặc định dùng TF-IDF Char N-gram vì độ chính xác cao và chạy ổn định trên Windows
+    matcher = CompanyMatcher()
     
     # 3. Xây dựng index
     matcher.build_index(system_companies)
 
-    # 4. Giả lập một số query "nhiễu" (không dấu, viết tắt, sai lệch)
+    # 4. Giả lập một số query thực tế
     test_queries = [
-        "VINAMILK",                        # Tên thương hiệu
-        "CTY CO PHAN SUA VIET NAM",        # Viết tắt + Không dấu
-        "ngan hang vietcombank",          # Tên tắt phổ biến
-        "Samsung Electronics VN",          # Viết tắt tiếng Anh
-        "VIETTEL",                         # Thương hiệu
-        "BIDV",                            # Viết tắt ngân hàng
-        "Tập đoàn Vingroup",               # Thiếu hậu tố
+        "BAO BI DUY TIN",                   # Tên sạch, không dấu
+        "TNHH THƯƠNG MẠI DỊCH VỤ XNK A&P",  # Tên đầy đủ
+        "IMPORT EXPORT A&P",                # Tên tiếng Anh / Loại hình tiếng Anh
+        "CÔNG TY TNHH TM DV WU GIA",        # Viết tắt
+        "văn phòng đại diện power điện",     # Đảo chữ + không dấu
+        "cty cp hdt",                       # Viết tắt + Tên ngắn
     ]
 
-    print("\n--- KẾT QUẢ SO KHỚP ---")
+    print("\n--- KẾT QUẢ SO KHỚP (Top 1) ---")
     for query in test_queries:
-        print(f"\nTruy vấn: '{query}'")
-        results = matcher.search(query, top_k=3)
-        for res in results:
-            print(f" -> {res['company']} (Score: {res['score']:.4f})")
+        results = matcher.search(query, top_k=1)
+        if results:
+            print(f"Query: '{query:30}' -> Match: {results[0]['company']} ({results[0]['score']:.4f})")
+        else:
+            print(f"Query: '{query:30}' -> Không tìm thấy")
 
 if __name__ == "__main__":
     main()
