@@ -1,0 +1,10 @@
+sentence-transformers
+faiss-cpu
+openai
+pyyaml
+pandas
+tqdm
+python-dotenv
+underthesea
+rapidfuzz
+numpy

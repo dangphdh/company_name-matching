@@ -1,0 +1,6 @@
+# api_key: "your_api_key_here"  # Ưu tiên sử dụng .env
+api_provider: "zai"           # "openai" hoặc "zai" (Zhipu AI / GLM)
+model_name: "glm-4.7"          # Ví dụ: gpt-4o-mini, glm-4-flash
+temperature: 0.3
+max_tokens: 2000
+batch_size: 15
