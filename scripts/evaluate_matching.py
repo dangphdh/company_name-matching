@@ -133,3 +133,13 @@ if __name__ == "__main__":
         model_name="wordllama-l2",
         remove_stopwords=False
     )
+
+    # Test với Vietnamese SBERT (Có loại stopword)
+    print("\n" + "="*50)
+    print("--- Testing Vietnamese SBERT (Remove Stopwords: True) ---")
+    evaluate_matcher(
+        corpus_file="data/eval/corpus.jsonl",
+        queries_file="data/eval/queries.jsonl",
+        model_name="keepitreal/vietnamese-sbert",
+        remove_stopwords=True
+    )

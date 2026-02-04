@@ -43,9 +43,19 @@ class CompanyMatcher:
                 return
 
             self.wl = WordLlama.load(config=config)
+        elif 'sbert' in model_name.lower() or '/' in model_name:
+            # Support for SentenceTransformer models (HuggingFace)
+            from sentence_transformers import SentenceTransformer
+            print(f"Using SentenceTransformer Matcher ({model_name})...")
+            self.st_model = SentenceTransformer(model_name, device='cuda' if self.use_gpu else 'cpu')
+        elif model_name.lower() == 'bm25':
+            # Support for BM25 ranking
+            from rank_bm25 import BM25Okapi
+            print(f"Using BM25 Matcher...")
+            self.bm25_model = None  # Will be initialized in build_index
         else:
             # Fallback hoặc nếu muốn dùng model khác từ HuggingFace (cần transformer)
-            print(f"Warning: Model {model_name} not explicitly handled for WordLlama/TF-IDF. Defaulting to TF-IDF.")
+            print(f"Warning: Model {model_name} not explicitly handled for WordLlama/SentenceTransformer/BM25/TF-IDF. Defaulting to TF-IDF.")
             self.model_name = 'tfidf'
             self.vectorizer = TfidfVectorizer(
                 analyzer='char', 
@@ -80,6 +90,14 @@ class CompanyMatcher:
         elif 'wordllama' in self.model_name:
             # WordLlama trả về numpy array
             self.corpus_vectors = self.wl.embed(processed_names)
+        elif hasattr(self, 'st_model'):
+            # SentenceTransformer
+            self.corpus_vectors = self.st_model.encode(processed_names, convert_to_numpy=True)
+        elif self.model_name == 'bm25':
+            # BM25 tokenization
+            from rank_bm25 import BM25Okapi
+            tokenized_corpus = [doc.split() for doc in processed_names]
+            self.bm25_model = BM25Okapi(tokenized_corpus)
             
         print(f"{self.model_name.upper()} Index built successfully.")
 
@@ -95,6 +113,13 @@ class CompanyMatcher:
         elif 'wordllama' in self.model_name:
             query_vec = self.wl.embed([query_cleaned])
             similarities = cosine_similarity(query_vec, self.corpus_vectors).flatten()
+        elif hasattr(self, 'st_model'):
+            query_vec = self.st_model.encode([query_cleaned], convert_to_numpy=True)
+            similarities = cosine_similarity(query_vec, self.corpus_vectors).flatten()
+        elif self.model_name == 'bm25':
+            # BM25 scoring
+            tokenized_query = query_cleaned.split()
+            similarities = self.bm25_model.get_scores(tokenized_query)
         
         # Lấy top k
         indices = np.argsort(similarities)[-top_k*3:][::-1] # Lấy dư để filter ids trùng

@@ -9,3 +9,5 @@ numpy
 scikit-learn
 beautifulsoup4
 requests
+sentence-transformers
+rank-bm25
