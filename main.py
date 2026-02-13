@@ -11,9 +11,15 @@ def main():
     with open(corpus_path, "r", encoding="utf-8") as f:
         system_companies = [line.strip() for line in f if line.strip()]
 
-    # 2. Khởi tạo Matcher 
-    # Mặc định dùng TF-IDF Char N-gram vì độ chính xác cao và chạy ổn định trên Windows
-    matcher = CompanyMatcher()
+    # 2. Khởi tạo Matcher - chọn modeltype
+    # Option 1: TF-IDF Char N-gram (classic, fast)
+    # matcher = CompanyMatcher(model_name='tfidf')
+    
+    # Option 2: BM25 (term relevance)
+    # matcher = CompanyMatcher(model_name='bm25')
+    
+    # Option 3: Hybrid TF-IDF + BM25 (best overall performance) ⭐ RECOMMENDED
+    matcher = CompanyMatcher(model_name='tfidf-bm25', tfidf_weight=0.5, bm25_weight=0.5)
     
     # 3. Xây dựng index
     matcher.build_index(system_companies)
@@ -29,12 +35,37 @@ def main():
     ]
 
     print("\n--- KẾT QUẢ SO KHỚP (Top 1) ---")
+    print(f"Model: {matcher.model_name.upper()}\n")
     for query in test_queries:
         results = matcher.search(query, top_k=1)
         if results:
             print(f"Query: '{query:30}' -> Match: {results[0]['company']} ({results[0]['score']:.4f})")
         else:
             print(f"Query: '{query:30}' -> Không tìm thấy")
+    
+    # 5. Demo comparing different models
+    print("\n\n--- DEMO: SO SÁNH CÁC MÔ HÌNH ---")
+    demo_query = "Vinamilk"
+    print(f"\nQuery: '{demo_query}'")
+    print("=" * 80)
+    
+    models = [
+        ('tfidf', {}),
+        ('bm25', {}),
+        ('tfidf-bm25', {'tfidf_weight': 0.5, 'bm25_weight': 0.5}),
+        ('tfidf-bm25', {'tfidf_weight': 0.7, 'bm25_weight': 0.3}),
+    ]
+    
+    for model_name, kwargs in models:
+        temp_matcher = CompanyMatcher(model_name=model_name, **kwargs)
+        temp_matcher.build_index(system_companies)
+        results = temp_matcher.search(demo_query, top_k=1)
+        if results:
+            label = model_name.upper()
+            if kwargs:
+                label += f" ({kwargs['tfidf_weight']}/{kwargs['bm25_weight']})"
+            print(f"{label:30} -> {results[0]['company']:40} (score: {results[0]['score']:.4f})")
 
 if __name__ == "__main__":
     main()
+

@@ -5,7 +5,7 @@ tqdm
 python-dotenv
 underthesea
 rapidfuzz
-numpy
+numpy<2
 scikit-learn
 beautifulsoup4
 requests
