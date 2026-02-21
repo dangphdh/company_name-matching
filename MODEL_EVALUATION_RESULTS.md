@@ -14,19 +14,20 @@ Comprehensive evaluation of multiple models for Vietnamese company name matching
 
 | Model | Top-1 | Top-3 | Latency | Notes |
 |-------|--------|--------|---------|-------|
-| **tfidf[sw=F] + entity-norm** | **88.80%** | **98.30%** | **10.24 ms** | **Best overall** |
-| **tfidf-rerank(n=5)+bge-m3** | **83.30%** | **99.60%** | **183.66 ms** | Best dense hybrid |
-| **tfidf-rerank(n=10)+bge-m3** | **82.90%** | **99.40%** | **182.80 ms** | |
-| **tfidf+bge-m3(w,0.7/0.3)** | **81.30%** | **99.40%** | **177.37 ms** | |
-| **tfidf-rerank(n=20)+bge-m3** | **81.90%** | **99.20%** | **182.66 ms** | |
-| **adaptive-rerank(t=0.1)+bge-m3** | **80.90%** | **99.00%** | **79.06 ms** | **Best latency/accuracy balance** |
-| **adaptive-rerank(t=0.05)+bge-m3** | **80.80%** | **98.80%** | **59.47 ms** | |
-| **tfidf+bge-m3(rrf)** | **80.30%** | **99.30%** | **179.78 ms** | |
-| **tfidf+bm25(0.5/0.5) + entity-norm** | **80.10%** | **99.50%** | **10.76 ms** | Best fast hybrid |
-| **adaptive-rerank(t=0.02)+bge-m3** | **80.10%** | **98.50%** | **48.34 ms** | |
-| **tfidf+bge-m3(w,0.5/0.5)** | **78.80%** | **99.70%** | **176.94 ms** | Best Top-3 dense |
+| **tfidf[sw=F]-rerank(n=5)+bge-m3** | **90.30%** | **98.00%** | **181 ms** | **Best Top-1 overall** |
+| **tfidf[sw=F]-rerank(n=10)+bge-m3** | **90.20%** | **97.80%** | **181 ms** | |
+| **tfidf[sw=F] + entity-norm** | **88.80%** | **98.30%** | **10.24 ms** | **Best fast (no GPU)** |
+| **tfidf[sw=F]-adaptive(t=0.10)+bge-m3** | **88.50%** | **98.10%** | **63 ms** | Adaptive dense fallback |
+| **tfidf-rerank(n=5)+bge-m3** | **83.30%** | **99.60%** | **176 ms** | Best Top-3 dense |
+| **tfidf-rerank(n=10)+bge-m3** | **82.90%** | **99.40%** | **177 ms** | |
+| **bm25+bge-m3(w,0.5/0.5)** | **81.80%** | **99.80%** | **175 ms** | **Best Top-3 overall** |
+| **tfidf+bge-m3(w,0.7/0.3)** | **81.30%** | **99.40%** | **178 ms** | |
+| **bm25+bge-m3(rrf)** | **81.10%** | **99.00%** | **175 ms** | |
+| **tfidf-rerank(n=20)+bge-m3** | **81.90%** | **99.20%** | **177 ms** | |
+| **adaptive-rerank(t=0.1)+bge-m3** | **80.90%** | **99.00%** | **79 ms** | Best latency/accuracy trade-off (sw=T) |
+| **tfidf+bm25(0.5/0.5) + entity-norm** | **80.10%** | **99.50%** | **11 ms** | Best fast sparse hybrid |
+| **bm25[sw=T] + entity-norm** | **79.60%** | **98.90%** | **3.66 ms** | Fastest option |
 | **tfidf[sw=T] + entity-norm** | **78.00%** | **98.00%** | **7.08 ms** | |
-| **bm25[sw=T] + entity-norm** | **79.60%** | **98.90%** | **3.66 ms** | Fastest good option |
 
 ### Historical Results (Before Entity-Type Normalization)
 
@@ -99,7 +100,19 @@ Added `fusion='adaptive-rerank'` to `CompanyMatcher`: TF-IDF retrieves top candi
 | t=0.05 | 80.80% | 98.80% | 59ms | ~33% queries |
 | t=0.10 | 80.90% | 99.00% | 79ms | ~45% queries |
 
-**Key takeaway:** Entity-type normalization is a pure preprocessing win (+12-15pp) that benefits ALL downstream models at zero latency cost. The `adaptive-rerank` variant with t=0.10 achieves 80.9% Top-1 at 79ms — a compelling middle ground between fast sparse (10ms) and full dense (180ms).
+**Combined sw=F retriever + BGE-M3 reranker (new champion):**  
+Using `remove_stopwords=False` (the stronger sparse retriever at 88.8%) as the first-stage retriever for BGE-M3 reranking produces the best results across all configurations:
+
+| Model | Top-1 | Top-3 | Latency | Notes |
+|-------|-------|-------|---------|-------|
+| tfidf[sw=F]-rerank(n=5)+bge-m3 | **90.30%** | 98.00% | 181ms | **New best Top-1** |
+| tfidf[sw=F]-rerank(n=10)+bge-m3 | **90.20%** | 97.80% | 181ms | |
+| tfidf[sw=F]-adaptive(t=0.10)+bge-m3 | 88.50% | 98.10% | 63ms | |
+| tfidf-rerank(n=5)+bge-m3 (sw=T) | 83.30% | 99.60% | 176ms | Previous best dense |
+
+**Note on Top-3 trade-off:** `tfidf[sw=F]-rerank(n=5)` has lower Top-3 (98.00%) than the sw=T variant (99.60%). With sw=F, the top-5 candidate pool contains more near-identical companies (same brand, different entity type). BGE-M3 correctly picks the right one at rank-1 more often, but occasionally shuffles the correct answer outside top-3. Use `tfidf-rerank(n=5)+bge-m3` (sw=T) if Top-3 recall is critical.
+
+**Key takeaway:** Entity-type normalization is a pure preprocessing win (+12–15pp) that benefits ALL downstream models at zero latency cost. The combined `tfidf[sw=F]-rerank(n=5)+bge-m3` achieves **90.30% Top-1** — the new overall champion.
 
 ### 1. TF-IDF (Term Frequency-Inverse Document Frequency)
 **Best performing model overall**
@@ -239,17 +252,18 @@ Added `fusion='adaptive-rerank'` to `CompanyMatcher`: TF-IDF retrieves top candi
 ## Performance Rankings
 
 ### By Top-1 Accuracy (After Entity-Type Normalization)
-1. **tfidf (sw=F) + entity-norm**: **88.80%** ⭐ **BEST**
-2. **tfidf-rerank(n=5)+bge-m3**: **83.30%** — best dense hybrid
-3. **tfidf-rerank(n=10)+bge-m3**: **82.90%**
-4. **tfidf+bge-m3(w,0.7/0.3)**: **81.30%**
-5. **tfidf-rerank(n=20)+bge-m3**: **81.90%**
-6. **adaptive-rerank(t=0.1)+bge-m3**: **80.90%** — best latency/accuracy balance
-7. **adaptive-rerank(t=0.05)+bge-m3**: **80.80%**
-8. **tfidf+bge-m3(rrf)**: **80.30%**
-9. **tfidf+bm25(0.5/0.5) + entity-norm**: **80.10%** — best fast hybrid
-10. **bm25[sw=T] + entity-norm**: **79.60%**
-11. **tfidf[sw=T] + entity-norm**: **78.00%**
+1. **tfidf[sw=F]-rerank(n=5)+bge-m3**: **90.30%** ⭐ **BEST OVERALL**
+2. **tfidf[sw=F]-rerank(n=10)+bge-m3**: **90.20%**
+3. **tfidf (sw=F) + entity-norm (sparse only)**: **88.80%** — best without GPU
+4. **tfidf[sw=F]-adaptive(t=0.10)+bge-m3**: **88.50%** — 63ms adaptive
+5. **tfidf-rerank(n=5)+bge-m3** (sw=T): **83.30%** — best Top-3 dense
+6. **tfidf-rerank(n=10)+bge-m3**: **82.90%**
+7. **bm25+bge-m3(w,0.5/0.5)**: **81.80%** — best Top-3 overall (99.80%)
+8. **tfidf+bge-m3(w,0.7/0.3)**: **81.30%**
+9. **bm25+bge-m3(rrf)**: **81.10%**
+10. **tfidf-rerank(n=20)+bge-m3**: **81.90%**
+11. **adaptive-rerank(t=0.1)+bge-m3** (sw=T): **80.90%** — best 79ms option
+12. **tfidf+bm25(0.5/0.5) + entity-norm**: **80.10%** — best fast sparse hybrid
 
 ### By Top-1 Accuracy (Before Entity Normalization — historical baseline)
 1. **TF-IDF (sw=False)**: 76.10%
@@ -257,23 +271,25 @@ Added `fusion='adaptive-rerank'` to `CompanyMatcher`: TF-IDF retrieves top candi
 3. **tfidf+bge-m3 (w, 0.7/0.3)**: 67.90%
 
 ### By Top-3 Accuracy (After Entity-Type Normalization)
-1. **tfidf+bge-m3(w,0.5/0.5)**: **99.70%** ⭐ **BEST**
-2. **tfidf-rerank(n=5)+bge-m3**: **99.60%**
-3. **tfidf+bm25**: **99.50%**
-4. **tfidf+bge-m3(w,0.7/0.3)**: **99.40%**
-5. **tfidf(sw=F)**: **98.30%**
-6. **tfidf(sw=T)**: **98.00%**
+1. **bm25+bge-m3(w,0.5/0.5)**: **99.80%** ⭐ **BEST TOP-3**
+2. **tfidf+bge-m3(w,0.5/0.5)**: **99.70%**
+3. **tfidf-rerank(n=5)+bge-m3** (sw=T): **99.60%**
+4. **tfidf+bm25**: **99.50%**
+5. **tfidf+bge-m3(w,0.7/0.3)**: **99.40%**
+6. **tfidf(sw=F)**: **98.30%**
+7. **tfidf[sw=F]-rerank(n=5)+bge-m3**: **98.00%** (lower Top-3 due to reranker shuffling)
 
 ### By Speed (Latency) — After Entity-Type Normalization
-1. **bm25[sw=T] + entity-norm**: **3.66 ms** ⚡ **FASTEST**
-2. **tfidf[sw=T] + entity-norm**: **7.08 ms**
-3. **tfidf[sw=F] + entity-norm**: **10.24 ms**
+1. **bm25[sw=T] + entity-norm**: **3.57 ms** ⚡ **FASTEST**
+2. **tfidf[sw=T] + entity-norm**: **7.35 ms**
+3. **tfidf[sw=F] + entity-norm**: **10.83 ms**
 4. **tfidf+bm25**: **~11 ms**
-5. **adaptive-rerank(t=0.02)+bge-m3**: **48.34 ms**
-6. **adaptive-rerank(t=0.05)+bge-m3**: **59.47 ms**
-7. **adaptive-rerank(t=0.1)+bge-m3**: **79.06 ms**
-8. **tfidf+bge-m3 (weighted/RRF)**: **~177–179 ms**
-9. **tfidf-rerank(n=5/10/20)+bge-m3**: **~183 ms**
+5. **adaptive-rerank(t=0.02)+bge-m3**: **47 ms**
+6. **adaptive-rerank(t=0.05)+bge-m3**: **57 ms**
+7. **tfidf[sw=F]-adaptive(t=0.10)+bge-m3**: **63 ms**
+8. **adaptive-rerank(t=0.1)+bge-m3**: **79 ms**
+9. **tfidf+bge-m3 (weighted/RRF)**: **~175–178 ms**
+10. **tfidf-rerank + tfidf[sw=F]-rerank**: **~176–181 ms**
 
 ## Key Insights
 
@@ -308,26 +324,32 @@ Added `fusion='adaptive-rerank'` to `CompanyMatcher`: TF-IDF retrieves top candi
 
 ### For Production Use (After Entity-Type Normalization)
 
-1. **Best accuracy, fast (< 15ms)**: **TF-IDF (sw=False) + entity-norm**
-   - 88.80% Top-1, 98.30% Top-3, ~10ms
-   - Simple CPU deployment, no GPU required
+1. **Maximum Top-1 accuracy**: **tfidf[sw=F]-rerank(n=5)+bge-m3**
+   - **90.30% Top-1**, 98.00% Top-3, ~181ms
+   - GPU recommended; ~181ms per query
 
-2. **Best accuracy + semantic fallback (< 100ms)**: **adaptive-rerank(t=0.1)+bge-m3**
-   - 80.90% Top-1, 99.00% Top-3, ~79ms
-   - Only calls dense model for ambiguous queries (~45% of queries)
-   - Good for production with GPU available
+2. **Best accuracy, no GPU (< 15ms)**: **TF-IDF (sw=False) + entity-norm**
+   - **88.80% Top-1**, 98.30% Top-3, ~11ms
+   - Simple CPU deployment, no additional model required
 
-3. **Maximum accuracy (dense)**: **tfidf-rerank(n=5)+bge-m3**
-   - 83.30% Top-1, 99.60% Top-3, ~184ms
-   - Best dense hybrid; always calls BGE-M3
+3. **Best accuracy + semantic fallback (< 70ms)**: **tfidf[sw=F]-adaptive(t=0.10)+bge-m3**
+   - **88.50% Top-1**, 98.10% Top-3, ~63ms
+   - Calls dense only when TF-IDF score gap is ambiguous
 
-4. **Extreme speed (< 4ms)**: **BM25 (sw=T) + entity-norm**
-   - 79.60% Top-1, 98.90% Top-3, ~3.7ms
-   - Fastest option while still benefiting from entity normalization
+4. **Best Top-3 recall with dense**: **tfidf-rerank(n=5)+bge-m3** (sw=T)
+   - 83.30% Top-1, **99.60% Top-3**, ~176ms
+   - Use when recall coverage is more important than precision
+
+5. **Best Top-3 overall**: **bm25+bge-m3(w,0.5/0.5)**
+   - 81.80% Top-1, **99.80% Top-3**, ~175ms
+
+6. **Extreme speed (< 4ms)**: **BM25 (sw=T) + entity-norm**
+   - 79.60% Top-1, 98.90% Top-3, ~3.6ms
 
 ### Deprecated/Superseded Recommendations (Pre-Normalization)
 ~~Primary Choice: TF-IDF (sw=False) — 76.1%~~ → replaced by entity-norm variant at 88.8%  
-~~Best hybrid Top-3: tfidf-rerank(n=5)+bge-m3 — 92.80%~~ → now 99.60% with entity-norm
+~~Best hybrid Top-3: tfidf-rerank(n=5)+bge-m3 — 92.80%~~ → now 99.60% with entity-norm  
+~~Best dense hybrid Top-1: tfidf-rerank(n=5)+bge-m3 — 83.30%~~ → now 90.30% with sw=F retriever
 
 ## Technical Implementation
 
@@ -354,21 +376,22 @@ wordllama
 
 The single most impactful improvement was **entity-type normalization** in preprocessing (+12–15pp Top-1 across all models). The root cause of ~1,700 failures per 5,000 queries was that stopword removal erased `cp`, `tnhh`, `mtv` — the only discriminators between companies sharing identical brand names but different legal entity types. Normalizing variant expressions to canonical tokens (`cổ phần` / `ctcp` / `jsc` → `cp`) before the stopword step, then keeping those canonical tokens as signal, eliminated the majority of ranking failures.
 
-**Current best configuration**: **TF-IDF (sw=False) + entity-type normalization** — **88.80% Top-1, 98.30% Top-3, ~10ms latency** — requiring no GPU and no additional models.
+**Current best configuration**: **`tfidf[sw=F]-rerank(n=5)+bge-m3`** — **90.30% Top-1, 98.00% Top-3, ~181ms** — combining the strongest sparse retriever (`sw=False` + entity normalization) with BGE-M3 reranking of the top-5 candidates.
 
-**For latency-constrained dense hybrid use**, `adaptive-rerank(t=0.1)+bge-m3` achieves 80.9% Top-1 at ~79ms by only invoking BGE-M3 on ambiguous queries where the TF-IDF top-gap is small.
+The key insight: using `remove_stopwords=False` (better sparse retriever at 88.8%) as the first stage means BGE-M3 reranks a higher-quality candidate pool, producing a +7pp Top-1 gain over the previous rerank variant (sw=T, 83.3%). For CPU-only deployments, `tfidf[sw=F] + entity-norm` alone (88.80%, ~11ms) remains the best no-GPU option.
 
-**Final Recommendations (Post Entity-Normalization):**
-- **Max accuracy, fast**: TF-IDF (sw=F) + entity-norm — 88.80% Top-1, ~10ms
-- **Best speed (sub-4ms)**: BM25 (sw=T) + entity-norm — 79.60% Top-1, ~3.7ms
-- **Best dense hybrid (Top-1)**: tfidf-rerank(n=5)+bge-m3 — 83.30% Top-1, ~184ms
-- **Best adaptive speed/accuracy**: adaptive-rerank(t=0.1)+bge-m3 — 80.90% Top-1, ~79ms
-- **Best Top-3 recall**: tfidf+bge-m3(w,0.5/0.5) — 99.70% Top-3, ~177ms
+**Final Recommendations (Post Entity-Normalization + Combined Variants):**
+- **Max accuracy overall**: tfidf[sw=F]-rerank(n=5)+bge-m3 — **90.30% Top-1**, ~181ms (GPU)
+- **Max accuracy, no GPU**: tfidf (sw=F) + entity-norm — **88.80% Top-1**, ~11ms
+- **Best speed/accuracy balance**: tfidf[sw=F]-adaptive(t=0.10)+bge-m3 — **88.50% Top-1**, ~63ms
+- **Best Top-3 recall**: bm25+bge-m3(w,0.5/0.5) — **99.80% Top-3**, ~175ms
+- **Best sub-4ms**: BM25 (sw=T) + entity-norm — 79.60% Top-1, ~3.6ms
 
 ---
 *Initial evaluation: February 5, 2026 — TF-IDF, BM25, BGE-M3, Vietnamese SBERT, WordLlama*
 *Sparse-sparse hybrid: February 20, 2026 — TF-IDF+BM25 weighted fusion*
 *Sparse-dense hybrid + reranking: February 21, 2026 — TF-IDF/BM25 + BGE-M3, weighted/RRF/rerank strategies*
 *Entity-type normalization + adaptive-rerank: February 2026 — Root-cause fix for entity confusion, +12–15pp across all models*
+*Combined sw=F retriever + BGE-M3 rerank: February 21, 2026 — tfidf[sw=F]-rerank(n=5)+bge-m3 achieves 90.30% Top-1, new best overall*
 *Dataset: 4,019 companies, 1,000 test queries (sampled, seed=42)*</content>
 <parameter name="filePath">/media/Mydisk/Dang/Project/company_name-matching/MODEL_EVALUATION_RESULTS.md
