@@ -1,6 +1,18 @@
 """
-Analyze failure cases of TF-IDF matcher to identify error patterns
+Analyze failure cases of any CompanyMatcher to identify error patterns
 and propose improvement directions.
+
+Examples:
+  # original TF-IDF baseline
+  python scripts/analyze_errors.py --model tfidf
+
+  # bm25+bge-m3(w,0.5/0.5) with entity-norm
+  python scripts/analyze_errors.py --model bm25-dense --fusion weighted \\
+      --sparse-weight 0.5 --dense-weight 0.5 --dense-model BAAI/bge-m3
+
+  # best model tfidf[sw=F]-rerank(n=5)+bge-m3
+  python scripts/analyze_errors.py --model tfidf-dense --sw-false \\
+      --fusion tfidf-rerank --rerank-n 5 --dense-model BAAI/bge-m3
 """
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -135,14 +147,21 @@ def categorize_query(query_text, target_name, method):
 
 # ─────────────────────────── collect failures ───────────────────
 
-def collect_failures(matcher, queries, corp_id_to_name, top_k=5):
+def collect_failures(matcher, queries, corp_id_to_name, top_k=5, min_score=0.0):
     failures, successes = [], []
     for query in queries:
         q_text = query['text']
         target_name = corp_id_to_name[query['target_id']]
-        results = matcher.search(q_text, top_k=top_k)
+        results = matcher.search(q_text, top_k=top_k, min_score=min_score)
         predicted = [r['company'] for r in results]
         scores = [r['score'] for r in results]
+
+        # All results that tie with the top-1 score count equally as "rank 1".
+        # This correctly handles near-duplicate corpus entries that share the
+        # same normalised form (e.g. "XNK" vs "XUẤT NHẬP KHẨU").
+        top1_score = scores[0] if scores else 0.0
+        top1_group = {r['company'] for r in results if r['score'] == top1_score}
+        is_top1_hit = bool(predicted) and target_name in top1_group
 
         entry = {
             'query': q_text,
@@ -151,11 +170,12 @@ def collect_failures(matcher, queries, corp_id_to_name, top_k=5):
             'predicted': predicted,
             'scores': scores,
         }
-        if predicted and predicted[0] == target_name:
+        if is_top1_hit:
             successes.append(entry)
         else:
             entry['top1_wrong'] = predicted[0] if predicted else None
             entry['top1_score'] = scores[0] if scores else 0.0
+            entry['suppressed'] = len(results) == 0  # emptied by min_score threshold
             # score the correct answer if it appears in top_k
             entry['target_in_topk'] = target_name in predicted
             entry['target_rank'] = (predicted.index(target_name) + 1
@@ -175,6 +195,8 @@ def analyze_failures(failures, successes):
     for f in failures:
         for tag in categorize_query(f['query'], f['target'], f['method']):
             tag_counter[tag] += 1
+        if f.get('suppressed', False):
+            tag_counter['suppressed'] += 1
 
     # ── 2. Method breakdown ───────────────────────────────────────
     method_fail = collections.Counter(f['method'] for f in failures)
@@ -186,7 +208,10 @@ def analyze_failures(failures, successes):
     }
 
     # ── 3. Score gap for failures ─────────────────────────────────
-    top1_scores = [f['top1_score'] for f in failures]
+    # Exclude suppressed entries (no result returned) from score stats
+    # so that artificial 0.0 scores don't skew the distribution.
+    non_suppressed = [f for f in failures if not f.get('suppressed', False)]
+    top1_scores = [f['top1_score'] for f in non_suppressed] if non_suppressed else [0.0]
     topk_hits = [f for f in failures if f['target_in_topk']]
 
     # ── 4. Longest common prefix / suffix analysis ────────────────
@@ -228,9 +253,13 @@ def analyze_failures(failures, successes):
 
 def print_report(stats, failures, top_examples=8):
     n, nf, ns = stats['total'], stats['n_fail'], stats['n_succ']
+    suppressed_n = sum(1 for f in failures if f.get('suppressed', False))
     print("\n" + "=" * 70)
     print(f"ERROR ANALYSIS REPORT  ({n} queries, {nf} failures, {ns} correct)")
     print(f"Overall Top-1 accuracy: {ns/n*100:.2f}%")
+    if suppressed_n:
+        print(f"  Suppressed (no result returned due to min_score): {suppressed_n} "
+              f"({suppressed_n/nf*100:.1f}% of failures)")
     print("=" * 70)
 
     # ── Per-method ───────────────────────────────────────────────
@@ -463,27 +492,78 @@ def _print_diagnosis(stats, nf):
 
 # ─────────────────────────── main ───────────────────────────────
 
+def _build_matcher(args):
+    """Construct a CompanyMatcher from CLI args."""
+    kwargs = dict(
+        model_name=args.model,
+        remove_stopwords=not args.sw_false,
+    )
+    if args.model in ('tfidf-dense', 'bm25-dense'):
+        kwargs['dense_model_name'] = args.dense_model
+        kwargs['fusion'] = args.fusion
+        kwargs['sparse_weight'] = args.sparse_weight
+        kwargs['dense_weight'] = args.dense_weight
+        kwargs['rerank_n'] = args.rerank_n
+        kwargs['rerank_threshold'] = args.rerank_threshold
+    return CompanyMatcher(**kwargs)
+
+
+def _model_label(args):
+    sw = 'sw=F' if args.sw_false else 'sw=T'
+    min_s = f' min_score={args.min_score}' if getattr(args, 'min_score', 0.0) > 0 else ''
+    if args.model in ('tfidf-dense', 'bm25-dense'):
+        extra = ''
+        if args.fusion == 'adaptive-rerank':
+            extra = f'(t={args.rerank_threshold:.2f})'
+        elif args.fusion in ('tfidf-rerank', 'cross-rerank'):
+            extra = f'(n={args.rerank_n})'
+        return (f"{args.model}[{sw}] fusion={args.fusion}{extra} "
+                f"dense={args.dense_model.split('/')[-1]} "
+                f"sparse={args.sparse_weight}/dense={args.dense_weight}{min_s}")
+    return f"{args.model}[{sw}]{min_s}"
+
+
 if __name__ == '__main__':
     import argparse
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(description=__doc__,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    # data
     parser.add_argument('--max-queries', type=int, default=5000)
-    parser.add_argument('--remove-stopwords', type=lambda x: x.lower() != 'false',
-                        default=True)
+    # model selection
+    parser.add_argument('--model', default='tfidf',
+                        choices=['tfidf', 'bm25', 'tfidf-dense', 'bm25-dense'],
+                        help='Retrieval model to analyse')
+    parser.add_argument('--sw-false', action='store_true',
+                        help='Disable stopword removal (remove_stopwords=False)')
+    # hybrid-only
+    parser.add_argument('--dense-model', default='BAAI/bge-m3',
+                        help='HuggingFace model id for dense stage')
+    parser.add_argument('--fusion', default='weighted',
+                        choices=['weighted', 'rrf', 'tfidf-rerank', 'adaptive-rerank', 'cross-rerank'],
+                        help='Fusion strategy for hybrid models')
+    parser.add_argument('--sparse-weight', type=float, default=0.5)
+    parser.add_argument('--dense-weight', type=float, default=0.5)
+    parser.add_argument('--rerank-n', type=int, default=5,
+                        help='Candidates for reranking (used with *-rerank fusion)')
+    parser.add_argument('--rerank-threshold', type=float, default=0.05,
+                        help='Score-gap threshold for adaptive-rerank fusion (default 0.05)')
+    parser.add_argument('--min-score', type=float, default=0.0,
+                        help='Confidence threshold: suppress results below this score (default 0.0 = disabled)')
     args = parser.parse_args()
 
+    label = _model_label(args)
+    print(f"=== Error Analysis: {label} ===\n")
     print(f"Loading eval data (max {args.max_queries} queries)...")
-    corpus, queries, corp_id_to_name = load_eval_data(
-        max_queries=args.max_queries)
+    corpus, queries, corp_id_to_name = load_eval_data(max_queries=args.max_queries)
     print(f"  Corpus: {len(corpus)} companies | Queries: {len(queries)}")
 
-    print(f"\nBuilding TF-IDF index (remove_stopwords={args.remove_stopwords})...")
-    matcher = CompanyMatcher(model_name='tfidf',
-                             remove_stopwords=args.remove_stopwords)
+    print(f"\nBuilding index [{label}]...")
+    matcher = _build_matcher(args)
     matcher.build_index(corpus)
 
     print("Running inference...")
-    failures, successes = collect_failures(matcher, queries, corp_id_to_name,
-                                           top_k=5)
+    failures, successes = collect_failures(matcher, queries, corp_id_to_name, top_k=5,
+                                           min_score=args.min_score)
 
     stats = analyze_failures(failures, successes)
     print_report(stats, failures)

@@ -12,22 +12,29 @@ Comprehensive evaluation of multiple models for Vietnamese company name matching
 
 ### ⭐ Current Best Results (After Entity-Type Normalization — Feb 2026)
 
+Full coverage models (`min_score=0.0`, answer every query):
+
 | Model | Top-1 | Top-3 | Latency | Notes |
 |-------|--------|--------|---------|-------|
 | **tfidf[sw=F]-rerank(n=5)+bge-m3** | **90.30%** | **98.00%** | **181 ms** | **Best Top-1 overall** |
 | **tfidf[sw=F]-rerank(n=10)+bge-m3** | **90.20%** | **97.80%** | **181 ms** | |
-| **tfidf[sw=F] + entity-norm** | **88.80%** | **98.30%** | **10.24 ms** | **Best fast (no GPU)** |
+| **tfidf[sw=F] + entity-norm** | **88.80%** | **98.30%** | **11 ms** | **Best fast (no GPU)** |
 | **tfidf[sw=F]-adaptive(t=0.10)+bge-m3** | **88.50%** | **98.10%** | **63 ms** | Adaptive dense fallback |
-| **tfidf-rerank(n=5)+bge-m3** | **83.30%** | **99.60%** | **176 ms** | Best Top-3 dense |
-| **tfidf-rerank(n=10)+bge-m3** | **82.90%** | **99.40%** | **177 ms** | |
+| **tfidf-rerank(n=5)+bge-m3** | **83.30%** | **99.60%** | **176 ms** | Best Top-3 dense (sw=T) |
 | **bm25+bge-m3(w,0.5/0.5)** | **81.80%** | **99.80%** | **175 ms** | **Best Top-3 overall** |
-| **tfidf+bge-m3(w,0.7/0.3)** | **81.30%** | **99.40%** | **178 ms** | |
-| **bm25+bge-m3(rrf)** | **81.10%** | **99.00%** | **175 ms** | |
-| **tfidf-rerank(n=20)+bge-m3** | **81.90%** | **99.20%** | **177 ms** | |
-| **adaptive-rerank(t=0.1)+bge-m3** | **80.90%** | **99.00%** | **79 ms** | Best latency/accuracy trade-off (sw=T) |
+| **adaptive-rerank(t=0.1)+bge-m3** | **80.90%** | **99.00%** | **79 ms** | Best latency/accuracy (sw=T) |
 | **tfidf+bm25(0.5/0.5) + entity-norm** | **80.10%** | **99.50%** | **11 ms** | Best fast sparse hybrid |
-| **bm25[sw=T] + entity-norm** | **79.60%** | **98.90%** | **3.66 ms** | Fastest option |
-| **tfidf[sw=T] + entity-norm** | **78.00%** | **98.00%** | **7.08 ms** | |
+| **bm25[sw=T] + entity-norm** | **79.60%** | **98.90%** | **3.57 ms** | Fastest option |
+| **tfidf[sw=T] + entity-norm** | **78.00%** | **98.00%** | **7.12 ms** | |
+
+Confidence-threshold variants of `tfidf[sw=F]-rerank(n=5)+bge-m3` (`min_score` > 0, abstain when score < threshold):
+
+| Variant | Top-1 (all) | Coverage | Precision@1 (answered) | Top-3 | Latency |
+|---------|-------------|----------|------------------------|-------|---------|
+| no threshold | 90.30% | 100.0% | — | 98.00% | 179 ms |
+| **t=0.76** *(best F0.5)* | **89.70%** | **97.5%** | **92.0%** | 96.50% | 179 ms |
+| t=0.90 *(≥95% precision)* | 66.70% | 69.8% | 95.6% | 69.60% | 179 ms |
+| t=0.96 *(≥98% precision)* | 29.60% | 30.2% | 98.0% | 30.20% | 180 ms |
 
 ### Historical Results (Before Entity-Type Normalization)
 
@@ -113,6 +120,74 @@ Using `remove_stopwords=False` (the stronger sparse retriever at 88.8%) as the f
 **Note on Top-3 trade-off:** `tfidf[sw=F]-rerank(n=5)` has lower Top-3 (98.00%) than the sw=T variant (99.60%). With sw=F, the top-5 candidate pool contains more near-identical companies (same brand, different entity type). BGE-M3 correctly picks the right one at rank-1 more often, but occasionally shuffles the correct answer outside top-3. Use `tfidf-rerank(n=5)+bge-m3` (sw=T) if Top-3 recall is critical.
 
 **Key takeaway:** Entity-type normalization is a pure preprocessing win (+12–15pp) that benefits ALL downstream models at zero latency cost. The combined `tfidf[sw=F]-rerank(n=5)+bge-m3` achieves **90.30% Top-1** — the new overall champion.
+
+### 9. Confidence Threshold — tfidf[sw=F]-rerank(n=5)+bge-m3 (February 22, 2026)
+
+**Motivation:** In production it is often preferable to return no answer than a wrong one. A `min_score` threshold on the BGE-M3 reranked top-1 score lets the system abstain on low-confidence queries, trading coverage for precision.
+
+**Score distribution** (1,000 queries, BGE-M3 reranked top-1 score):
+
+| Percentile | Score |
+|-----------|-------|
+| p0 (min) | 0.666 |
+| p25 | 0.880 |
+| p50 (median) | 0.940 |
+| p75 | 0.966 |
+| p90 | 1.000 |
+
+Scores are compressed into a high range (min=0.67, median=0.94) — thresholds below ~0.66 have no effect; the useful range is **0.76–0.98**.
+
+**Full threshold sweep (selected rows):**
+
+| min_score | Coverage | Precision@1 | Correct | Answered | F0.5 |
+|-----------|----------|-------------|---------|----------|------|
+| 0.00 | 100.0% | 90.3% | 903 | 1000 | 92.09 |
+| 0.70 | 99.8% | 90.5% | 903 | 998 | 92.20 |
+| 0.74 | 98.5% | 91.4% | 900 | 985 | 92.71 |
+| **0.76** | **97.5%** | **92.0%** | **897** | **975** | **93.05 ⭐ best F0.5** |
+| 0.80 | 93.6% | 92.5% | 866 | 936 | 92.74 |
+| 0.84 | 85.2% | 93.4% | 796 | 852 | 91.66 |
+| 0.88 | 75.1% | 94.3% | 708 | 751 | 89.69 |
+| **0.90** | **69.8%** | **95.6%** | **667** | **698** | **88.99** ← 95% precision |
+| 0.92 | 62.7% | 96.2% | 603 | 627 | 86.89 |
+| **0.96** | **30.2%** | **98.0%** | **296** | **302** | **67.64** ← 98% precision |
+| 0.98 | 14.3% | 99.3% | 142 | 143 | 45.37 ← 99% precision |
+
+**Recommended operating points:**
+
+| Use case | `min_score` | Coverage | Precision@1 |
+|----------|-------------|----------|-------------|
+| Maximum coverage (default) | 0.00 | 100% | 90.3% |
+| **Balanced — best F0.5** | **0.76** | **97.5%** | **92.0%** |
+| High-precision, human review on abstain | 0.90 | 69.8% | 95.6% |
+| Near-certain only | 0.96 | 30.2% | 98.0% |
+
+**API usage:**
+```python
+matcher = CompanyMatcher(
+    model_name='tfidf-dense',
+    remove_stopwords=False,
+    dense_model_name='BAAI/bge-m3',
+    fusion='tfidf-rerank',
+    rerank_n=5,
+)
+matcher.build_index(corpus)
+
+# Balanced mode — abstain ~2.5% of queries, precision 92.0%
+results = matcher.search(query, min_score=0.76)
+if not results:
+    # score too low — route to human review or fallback pipeline
+    ...
+
+# Near-certain only — 98.0% precision, abstain ~70% of queries
+results = matcher.search(query, min_score=0.96)
+```
+
+**Key findings:**
+- Score floor is 0.67 — thresholds ≤ 0.66 have zero effect
+- `t=0.76` is the "sweet spot": only 2.5% abstention rate, precision rises 90.3% → 92.0%
+- `t=0.90` gives ≥95% precision but answers only 70% of queries — suitable for automated high-stakes decisions with human fallback
+- `t=0.96` gives ≥98% precision — near-certain automatic matching; the remaining 70% of queries need a separate pipeline
 
 ### 1. TF-IDF (Term Frequency-Inverse Document Frequency)
 **Best performing model overall**
@@ -251,7 +326,7 @@ Using `remove_stopwords=False` (the stronger sparse retriever at 88.8%) as the f
 
 ## Performance Rankings
 
-### By Top-1 Accuracy (After Entity-Type Normalization)
+### By Top-1 Accuracy — full coverage (After Entity-Type Normalization)
 1. **tfidf[sw=F]-rerank(n=5)+bge-m3**: **90.30%** ⭐ **BEST OVERALL**
 2. **tfidf[sw=F]-rerank(n=10)+bge-m3**: **90.20%**
 3. **tfidf (sw=F) + entity-norm (sparse only)**: **88.80%** — best without GPU
@@ -264,6 +339,15 @@ Using `remove_stopwords=False` (the stronger sparse retriever at 88.8%) as the f
 10. **tfidf-rerank(n=20)+bge-m3**: **81.90%**
 11. **adaptive-rerank(t=0.1)+bge-m3** (sw=T): **80.90%** — best 79ms option
 12. **tfidf+bm25(0.5/0.5) + entity-norm**: **80.10%** — best fast sparse hybrid
+
+### By Precision@1 — with confidence threshold (`tfidf[sw=F]-rerank(n=5)+bge-m3`)
+
+| min_score | Precision@1 (answered) | Coverage | F0.5 |
+|-----------|------------------------|----------|------|
+| 0.00 | 90.3% | 100.0% | 92.09 |
+| **0.76** | **92.0%** | **97.5%** | **93.05 ⭐** |
+| 0.90 | 95.6% | 69.8% | 88.99 |
+| 0.96 | 98.0% | 30.2% | 67.64 |
 
 ### By Top-1 Accuracy (Before Entity Normalization — historical baseline)
 1. **TF-IDF (sw=False)**: 76.10%
@@ -324,27 +408,35 @@ Using `remove_stopwords=False` (the stronger sparse retriever at 88.8%) as the f
 
 ### For Production Use (After Entity-Type Normalization)
 
-1. **Maximum Top-1 accuracy**: **tfidf[sw=F]-rerank(n=5)+bge-m3**
-   - **90.30% Top-1**, 98.00% Top-3, ~181ms
-   - GPU recommended; ~181ms per query
+1. **Maximum Top-1, full coverage**: **tfidf[sw=F]-rerank(n=5)+bge-m3**
+   - **90.30% Top-1**, 98.00% Top-3, ~179ms
+   - GPU recommended; ~179ms per query
 
-2. **Best accuracy, no GPU (< 15ms)**: **TF-IDF (sw=False) + entity-norm**
+2. **High-trust matching (balanced)**: **tfidf[sw=F]-rerank(n=5)+bge-m3 `min_score=0.76`**
+   - **92.0% Precision@1** among answered, 97.5% coverage, ~179ms
+   - Best F0.5 trade-off; abstains on only ~2.5% of queries
+
+3. **Automated high-stakes decisions**: **tfidf[sw=F]-rerank(n=5)+bge-m3 `min_score=0.90`**
+   - **95.6% Precision@1** among answered, 69.8% coverage
+   - Route the 30.2% abstained queries to human review or fallback pipeline
+
+4. **Best accuracy, no GPU (< 15ms)**: **TF-IDF (sw=False) + entity-norm**
    - **88.80% Top-1**, 98.30% Top-3, ~11ms
    - Simple CPU deployment, no additional model required
 
-3. **Best accuracy + semantic fallback (< 70ms)**: **tfidf[sw=F]-adaptive(t=0.10)+bge-m3**
+5. **Best accuracy + adaptive dense (< 70ms)**: **tfidf[sw=F]-adaptive(t=0.10)+bge-m3**
    - **88.50% Top-1**, 98.10% Top-3, ~63ms
    - Calls dense only when TF-IDF score gap is ambiguous
 
-4. **Best Top-3 recall with dense**: **tfidf-rerank(n=5)+bge-m3** (sw=T)
+6. **Best Top-3 recall with dense**: **tfidf-rerank(n=5)+bge-m3** (sw=T)
    - 83.30% Top-1, **99.60% Top-3**, ~176ms
    - Use when recall coverage is more important than precision
 
-5. **Best Top-3 overall**: **bm25+bge-m3(w,0.5/0.5)**
+7. **Best Top-3 overall**: **bm25+bge-m3(w,0.5/0.5)**
    - 81.80% Top-1, **99.80% Top-3**, ~175ms
 
-6. **Extreme speed (< 4ms)**: **BM25 (sw=T) + entity-norm**
-   - 79.60% Top-1, 98.90% Top-3, ~3.6ms
+8. **Extreme speed (< 4ms)**: **BM25 (sw=T) + entity-norm**
+   - 79.60% Top-1, 98.90% Top-3, ~3.57ms
 
 ### Deprecated/Superseded Recommendations (Pre-Normalization)
 ~~Primary Choice: TF-IDF (sw=False) — 76.1%~~ → replaced by entity-norm variant at 88.8%  
@@ -380,12 +472,14 @@ The single most impactful improvement was **entity-type normalization** in prepr
 
 The key insight: using `remove_stopwords=False` (better sparse retriever at 88.8%) as the first stage means BGE-M3 reranks a higher-quality candidate pool, producing a +7pp Top-1 gain over the previous rerank variant (sw=T, 83.3%). For CPU-only deployments, `tfidf[sw=F] + entity-norm` alone (88.80%, ~11ms) remains the best no-GPU option.
 
-**Final Recommendations (Post Entity-Normalization + Combined Variants):**
-- **Max accuracy overall**: tfidf[sw=F]-rerank(n=5)+bge-m3 — **90.30% Top-1**, ~181ms (GPU)
+**Final Recommendations (Post Entity-Normalization + Threshold):**
+- **Max accuracy (full coverage)**: tfidf[sw=F]-rerank(n=5)+bge-m3 — **90.30% Top-1**, ~179ms (GPU)
+- **Max precision, balanced**: tfidf[sw=F]-rerank(n=5)+bge-m3 `min_score=0.76` — **92.0% Precision@1**, 97.5% coverage
+- **High-stakes automation**: tfidf[sw=F]-rerank(n=5)+bge-m3 `min_score=0.90` — **95.6% Precision@1**, 69.8% coverage
 - **Max accuracy, no GPU**: tfidf (sw=F) + entity-norm — **88.80% Top-1**, ~11ms
-- **Best speed/accuracy balance**: tfidf[sw=F]-adaptive(t=0.10)+bge-m3 — **88.50% Top-1**, ~63ms
+- **Best adaptive latency**: tfidf[sw=F]-adaptive(t=0.10)+bge-m3 — **88.50% Top-1**, ~63ms
 - **Best Top-3 recall**: bm25+bge-m3(w,0.5/0.5) — **99.80% Top-3**, ~175ms
-- **Best sub-4ms**: BM25 (sw=T) + entity-norm — 79.60% Top-1, ~3.6ms
+- **Best sub-4ms**: BM25 (sw=T) + entity-norm — 79.60% Top-1, ~3.57ms
 
 ---
 *Initial evaluation: February 5, 2026 — TF-IDF, BM25, BGE-M3, Vietnamese SBERT, WordLlama*
@@ -393,5 +487,6 @@ The key insight: using `remove_stopwords=False` (better sparse retriever at 88.8
 *Sparse-dense hybrid + reranking: February 21, 2026 — TF-IDF/BM25 + BGE-M3, weighted/RRF/rerank strategies*
 *Entity-type normalization + adaptive-rerank: February 2026 — Root-cause fix for entity confusion, +12–15pp across all models*
 *Combined sw=F retriever + BGE-M3 rerank: February 21, 2026 — tfidf[sw=F]-rerank(n=5)+bge-m3 achieves 90.30% Top-1, new best overall*
+*Confidence threshold analysis: February 22, 2026 — min_score parameter; t=0.76 → 92.0% Precision@1 at 97.5% coverage (best F0.5); t=0.90 → 95.6% at 69.8%; t=0.96 → 98.0% at 30.2%*
 *Dataset: 4,019 companies, 1,000 test queries (sampled, seed=42)*</content>
 <parameter name="filePath">/media/Mydisk/Dang/Project/company_name-matching/MODEL_EVALUATION_RESULTS.md

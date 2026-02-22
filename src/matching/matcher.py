@@ -1,7 +1,42 @@
+import re
+import math
 import numpy as np
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 from src.preprocess import clean_company_name, remove_accents
+
+
+def _sigmoid(x):
+    """Sigmoid to map cross-encoder logits → (0, 1) probability."""
+    return 1.0 / (1.0 + math.exp(-float(x)))
+
+# Entity-type tokens that are meaningful discriminators between sibling companies.
+# Ordered by specificity so the first match wins.
+_ENTITY_TYPE_TOKENS = ('vpdd', 'cn', 'td', 'htx', 'hd', 'tnhh', 'cp', 'mtv')
+
+def _extract_entity_type(cleaned_name: str):
+    """Return the first entity-type token found in a cleaned company name, or None."""
+    tokens = set(cleaned_name.split())
+    for et in _ENTITY_TYPE_TOKENS:
+        if et in tokens:
+            return et
+    return None
+
+
+def _has_repeated_tokens(name: str) -> bool:
+    """Return True if the cleaned name contains any consecutive repeated token
+    or consecutive repeated bigram (e.g. 'san xuat san xuat')."""
+    tokens = name.split()
+    # Check repeated unigrams
+    for i in range(len(tokens) - 1):
+        if tokens[i] == tokens[i + 1] and len(tokens[i]) > 1:
+            return True
+    # Check repeated bigrams
+    for i in range(len(tokens) - 3):
+        if tokens[i] == tokens[i + 2] and tokens[i + 1] == tokens[i + 3]:
+            return True
+    return False
+
 
 def _rrf_fuse(score_lists, k=60):
     """
@@ -47,6 +82,8 @@ class CompanyMatcher:
                 'union-rerank'    — TF-IDF top-N ∪ dense top-N, reranked by dense
                 'adaptive-rerank' — TF-IDF first; if gap(top1, top2) < rerank_threshold
                                     rerank top-rerank_n candidates with dense
+                'cross-rerank'    — TF-IDF retrieves rerank_n candidates, CrossEncoder
+                                    (e.g. BAAI/bge-reranker-base) rescores each pair
             rerank_n: Candidates retrieved per retriever for rerank strategies
             rerank_threshold: Score gap below which adaptive-rerank triggers (default 0.05)
         """
@@ -84,7 +121,7 @@ class CompanyMatcher:
             self.bm25_model = None  # Will be initialized in build_index
         elif model_name == 'tfidf-dense':
             print(f"Using Hybrid TF-IDF + Dense ({dense_model_name}) Matcher "
-                  f"[fusion={fusion}"  
+                  f"[fusion={fusion}"
                   + (f", rerank_n={rerank_n}]..." if 'rerank' in fusion
                      else f", sparse={sparse_weight}, dense={dense_weight}]..."))
             self.vectorizer = TfidfVectorizer(
@@ -93,10 +130,17 @@ class CompanyMatcher:
                 sublinear_tf=True,
                 min_df=1
             )
-            from sentence_transformers import SentenceTransformer
-            self.st_model = SentenceTransformer(
-                dense_model_name, device='cuda' if use_gpu else 'cpu'
-            )
+            if fusion == 'cross-rerank':
+                from sentence_transformers import CrossEncoder
+                print(f"  Loading CrossEncoder: {dense_model_name}...")
+                self.cross_encoder = CrossEncoder(
+                    dense_model_name, device='cuda' if use_gpu else 'cpu'
+                )
+            else:
+                from sentence_transformers import SentenceTransformer
+                self.st_model = SentenceTransformer(
+                    dense_model_name, device='cuda' if use_gpu else 'cpu'
+                )
         elif model_name == 'bm25-dense':
             print(f"Using Hybrid BM25 + Dense ({dense_model_name}) Matcher "
                   f"[fusion={fusion}, sparse={sparse_weight}, dense={dense_weight}]...")
@@ -153,17 +197,37 @@ class CompanyMatcher:
         self.corpus_names = names
         processed_names = []
         self.name_mapping = []
-        
+
+        # Warn about corpus entries with consecutive duplicate tokens — these
+        # inflate char n-gram similarity for unrelated queries.
+        bad = [n for n in names if _has_repeated_tokens(
+            remove_accents(clean_company_name(n, remove_stopwords=False)))]
+        if bad:
+            print(f"  [WARN] {len(bad)} corpus entries have repeated consecutive tokens "
+                  f"(e.g. 'SẢN XUẤT SẢN XUẤT'). They will be penalised at search time.")
+
+        # norm_key = remove_accents(cleaned).  Maps to all original indices that
+        # produce the same normalised form so that near-duplicate corpus entries
+        # (e.g. "XUẤT NHẬP KHẨU" vs "XNK" after normalisation) are returned
+        # together when the query matches either one.
+        self._norm_to_originals = {}   # norm_key → [original_idx, ...]
+        self._orig_to_norm   = {}      # original_idx → norm_key
+
         for i, name in enumerate(names):
             cleaned = clean_company_name(name, remove_stopwords=self.remove_stopwords)
             no_accent = remove_accents(cleaned)
-            
+
             processed_names.append(cleaned)
             self.name_mapping.append(i)
-            
+
             if cleaned != no_accent:
                 processed_names.append(no_accent)
                 self.name_mapping.append(i)
+
+            # group by no-accent canonical key
+            key = no_accent
+            self._orig_to_norm[i] = key
+            self._norm_to_originals.setdefault(key, []).append(i)
 
         print(f"Vectorizing {len(processed_names)} variants for {len(names)} companies...")
         
@@ -176,14 +240,18 @@ class CompanyMatcher:
             tokenized_corpus = [doc.split() for doc in processed_names]
             self.bm25_model = BM25Okapi(tokenized_corpus)
         elif self.model_name == 'tfidf-dense':
-            # Sparse: TF-IDF char n-gram
+            # Sparse: TF-IDF char n-gram (always)
             self.corpus_vectors = self.vectorizer.fit_transform(processed_names)
-            # Dense: sentence embedding
-            print(f"  Encoding dense embeddings for {len(processed_names)} variants...")
-            self.dense_vectors = self.st_model.encode(
-                processed_names, batch_size=512,
-                show_progress_bar=False, convert_to_numpy=True, normalize_embeddings=True
-            )
+            # Dense: sentence embedding (not needed for cross-rerank — CE scores at query time)
+            if self.fusion != 'cross-rerank':
+                print(f"  Encoding dense embeddings for {len(processed_names)} variants...")
+                self.dense_vectors = self.st_model.encode(
+                    processed_names, batch_size=512,
+                    show_progress_bar=False, convert_to_numpy=True, normalize_embeddings=True
+                )
+            else:
+                # Store processed names so cross-encoder can look up cleaned forms
+                self._processed_names = processed_names
         elif self.model_name == 'bm25-dense':
             # Sparse: BM25
             from rank_bm25 import BM25Okapi
@@ -209,9 +277,18 @@ class CompanyMatcher:
             
         print(f"{self.model_name.upper()} Index built successfully.")
 
-    def search(self, query, top_k=5):
+    def search(self, query, top_k=5, min_score=0.0):
         """
         Tìm kiếm công ty phù hợp nhất cho 1 query.
+
+        Args:
+            query: Input query string.
+            top_k: Maximum number of results to return.
+            min_score: Confidence threshold. Results whose top-1 score is below
+                       this value are suppressed entirely (returns [] for that
+                       query). Use to trade coverage for precision — only return
+                       an answer when the model is sufficiently confident.
+                       Default 0.0 (no filtering, backward-compatible).
         """
         query_cleaned = clean_company_name(query, remove_stopwords=self.remove_stopwords)
         
@@ -242,7 +319,45 @@ class CompanyMatcher:
                 ds = (self.dense_vectors @ qd.T).flatten()
                 return np.clip(ds, 0, 1)
 
-            if self.fusion == 'tfidf-rerank':
+            if self.fusion == 'cross-rerank':
+                # Stage 1: TF-IDF retrieves rerank_n unique companies
+                sparse_indices = np.argsort(sparse_scores)[::-1]
+                cand_oids = []
+                seen_ce = set()
+                for idx in sparse_indices:
+                    oid = self.name_mapping[idx]
+                    if oid not in seen_ce:
+                        seen_ce.add(oid)
+                        cand_oids.append(oid)
+                    if len(cand_oids) >= self.rerank_n:
+                        break
+
+                # Stage 2: CrossEncoder scores (query_cleaned, candidate_cleaned) pairs
+                cand_cleaned = [
+                    remove_accents(clean_company_name(
+                        self.corpus_names[oid],
+                        remove_stopwords=self.remove_stopwords
+                    ))
+                    for oid in cand_oids
+                ]
+                pairs = [(query_cleaned, c) for c in cand_cleaned]
+                ce_logits = self.cross_encoder.predict(pairs)
+                # Sigmoid-normalise logits → (0, 1)
+                ce_norm = {oid: _sigmoid(s)
+                           for oid, s in zip(cand_oids, ce_logits)}
+
+                # Build similarities array: -inf for non-candidates
+                similarities = np.full(len(sparse_scores), -np.inf)
+                oid_to_max = {}
+                for idx in range(len(sparse_scores)):
+                    oid = self.name_mapping[idx]
+                    if oid in ce_norm:
+                        s = ce_norm[oid]
+                        if s > oid_to_max.get(oid, -np.inf):
+                            oid_to_max[oid] = s
+                            similarities[idx] = s
+
+            elif self.fusion == 'tfidf-rerank':
                 dense_scores = _get_dense_scores()
                 # Stage 1: TF-IDF retrieves rerank_n unique companies
                 sparse_indices = np.argsort(sparse_scores)[::-1]
@@ -360,25 +475,77 @@ class CompanyMatcher:
             tokenized_query = query_cleaned.split()
             similarities = self.bm25_model.get_scores(tokenized_query)
         
-        # Lấy top k
-        indices = np.argsort(similarities)[-top_k*3:][::-1] # Lấy dư để filter ids trùng
-        
+        # Lấy top k — oversample to handle dedup and norm-key expansion
+        indices = np.argsort(similarities)[-top_k * 5:][::-1]
+
         results = []
-        seen_ids = set()
+        seen_norm_keys = set()   # dedup by canonical normalised form
         for idx in indices:
             score = similarities[idx]
-            if score <= 0: continue
-            
+            if score <= 0:
+                continue
+
             original_idx = self.name_mapping[idx]
-            if original_idx not in seen_ids:
+            norm_key = self._orig_to_norm.get(original_idx)
+
+            if norm_key is None or norm_key in seen_norm_keys:
+                continue
+            seen_norm_keys.add(norm_key)
+
+            # Expand: emit all corpus entries that share this normalised form.
+            # Typically just one entry; >1 only for near-duplicate corpus names
+            # (e.g. "CÔNG TY TNHH XUẤT NHẬP KHẨU ABC" and
+            #        "CÔNG TY TNHH XNK ABC" both → same norm_key).
+            for oid in self._norm_to_originals[norm_key]:
                 results.append({
-                    "company": self.corpus_names[original_idx],
-                    "score": float(score)
+                    "company": self.corpus_names[oid],
+                    "score": float(score),
+                    "_norm_key": norm_key,
                 })
-                seen_ids.add(original_idx)
-                if len(results) >= top_k:
-                    break
-                
+
+            if len(results) >= top_k:
+                break
+
+        # ── Post-processing ──────────────────────────────────────────────────
+
+        # 1. Repeated-token penalty: demote corpus entries whose cleaned name
+        #    contains consecutive duplicate tokens (data-quality artifact such as
+        #    "SẢN XUẤT SẢN XUẤT"), which can spuriously dominate char n-gram scores.
+        REPEAT_PENALTY = 0.85
+        for r in results:
+            if _has_repeated_tokens(r['_norm_key']):
+                r['score'] *= REPEAT_PENALTY
+
+        # Re-sort after penalty
+        results.sort(key=lambda x: x['score'], reverse=True)
+
+        # 2. Entity-type aware tie-breaking: if the query explicitly names an
+        #    entity type (tnhh/cp/cn/td/…) and top-1 has a different entity type,
+        #    promote the highest-scoring result that DOES match—provided its score
+        #    is within ENTITY_GAP_THRESHOLD of top-1.
+        ENTITY_GAP_THRESHOLD = 0.20
+        query_et = _extract_entity_type(query_cleaned)
+        if query_et and len(results) > 1:
+            top1_et = _extract_entity_type(results[0]['_norm_key'])
+            if top1_et != query_et:
+                # Find the best matching result
+                for j in range(1, len(results)):
+                    cand_et = _extract_entity_type(results[j]['_norm_key'])
+                    if cand_et == query_et:
+                        gap = results[0]['score'] - results[j]['score']
+                        if gap <= ENTITY_GAP_THRESHOLD:
+                            # Promote: move results[j] to position 0
+                            results.insert(0, results.pop(j))
+                        break  # only check the highest-scored matching candidate
+
+        # Strip internal fields before returning
+        for r in results:
+            r.pop('_norm_key', None)
+
+        # Apply confidence threshold: suppress results when top-1 score is too low
+        if min_score > 0.0 and results and results[0]['score'] < min_score:
+            return []
+
         return results
 
 if __name__ == "__main__":

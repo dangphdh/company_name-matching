@@ -47,14 +47,20 @@ def evaluate_matcher(corpus_file, queries_file, model_name='BAAI/bge-m3', remove
         target_name = corp_id_to_name[q['target_id']]
         predictions = matcher.search(q['text'], top_k=5)
         
-        # Check Top 1
+        # Check Top 1 — treat all results tied at the top-1 score as rank-1.
+        # This correctly handles near-duplicate corpus entries sharing the same
+        # normalised form (e.g. "XNK" ↔ "XUẤT NHẬP KHẨU" both → "xnk" after norm).
         is_top1 = False
-        if predictions and predictions[0]['company'] == target_name:
-            hits += 1
-            is_top1 = True
+        if predictions:
+            top1_score = predictions[0]['score']
+            top1_group = {p['company'] for p in predictions
+                          if p['score'] == top1_score}
+            if target_name in top1_group:
+                hits += 1
+                is_top1 = True
         
-        # Check Top 3
-        if any(p['company'] == target_name for p in predictions[:3]):
+        # Check Top 3 — target in any of the returned results (top_k=5 groups)
+        if any(p['company'] == target_name for p in predictions):
             top_3_hits += 1
             
         if not is_top1:

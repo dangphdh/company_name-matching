@@ -32,50 +32,73 @@ def load_eval_data(max_queries=1000):
     
     return corpus, queries, corp_id_to_name
 
-def evaluate_matcher(model_name, corpus, queries, corp_id_to_name, label=None, **kwargs):
-    """Evaluate a matcher model"""
+def evaluate_matcher(model_name, corpus, queries, corp_id_to_name, label=None, min_score=0.0, **kwargs):
+    """Evaluate a matcher model.
+
+    Args:
+        min_score: Confidence threshold passed to search(). Queries where the
+                   top-1 score is below this value are treated as abstained
+                   (not answered).  Coverage = answered / total is reported.
+    """
     display_name = label or model_name
     print(f"\n{'='*60}")
     print(f"Evaluating: {display_name}")
     print(f"{'='*60}")
-    
+
     matcher = CompanyMatcher(model_name=model_name, **kwargs)
     matcher.build_index(corpus)
-    
+
     top1_correct = 0
     top3_correct = 0
+    answered = 0
     total_queries = len(queries)
     latencies = []
-    
+
     for query in queries:
         query_text = query['text']
         target_name = corp_id_to_name[query['target_id']]
-        
+
         start = time.time()
-        results = matcher.search(query_text, top_k=3)
+        results = matcher.search(query_text, top_k=3, min_score=min_score)
         elapsed = time.time() - start
         latencies.append(elapsed)
-        
-        # Check if correct company is in results
+
         predicted_names = [r['company'] for r in results]
-        
-        if predicted_names and predicted_names[0] == target_name:
-            top1_correct += 1
-        if target_name in predicted_names[:3]:
-            top3_correct += 1
-    
-    top1_accuracy = (top1_correct / total_queries * 100) if total_queries > 0 else 0
-    top3_accuracy = (top3_correct / total_queries * 100) if total_queries > 0 else 0
-    avg_latency = np.mean(latencies) * 1000  # Convert to ms
-    
+
+        if predicted_names:            # model returned an answer
+            answered += 1
+            # Treat all results tied at the top-1 score as rank-1 (handles
+            # near-duplicate corpus entries with the same normalised form).
+            top1_score = results[0]['score']
+            top1_group = {r['company'] for r in results if r['score'] == top1_score}
+            if target_name in top1_group:
+                top1_correct += 1
+            if target_name in predicted_names:
+                top3_correct += 1
+
+    coverage        = answered / total_queries * 100
+    # Precision: accuracy *among answered* queries
+    precision_top1  = (top1_correct / answered  * 100) if answered > 0 else 0
+    precision_top3  = (top3_correct / answered  * 100) if answered > 0 else 0
+    # Recall-style: correct over *all* queries (same as old Top-1 Accuracy)
+    top1_accuracy   = top1_correct / total_queries * 100
+    top3_accuracy   = top3_correct / total_queries * 100
+    avg_latency     = np.mean(latencies) * 1000
+
     print(f"Top-1 Accuracy: {top1_accuracy:.2f}% ({top1_correct}/{total_queries})")
     print(f"Top-3 Accuracy: {top3_accuracy:.2f}% ({top3_correct}/{total_queries})")
+    if min_score > 0:
+        print(f"Coverage:       {coverage:.1f}% ({answered}/{total_queries} answered)")
+        print(f"Precision@1:    {precision_top1:.2f}% (among answered)")
+        print(f"Precision@3:    {precision_top3:.2f}% (among answered)")
     print(f"Average Latency: {avg_latency:.2f}ms")
-    
+
     return {
         'model': display_name,
         'top1_accuracy': top1_accuracy,
         'top3_accuracy': top3_accuracy,
+        'coverage': coverage,
+        'precision_top1': precision_top1,
         'avg_latency': avg_latency
     }
 
@@ -169,6 +192,19 @@ if __name__ == '__main__':
                                             rerank_threshold=0.10,
                                             remove_stopwords=False))
 
+            # ── Confidence thresholds on best variant ────────────────────────
+            # Best F0.5 trade-off (0.76): 97.5% coverage → 92.0% precision
+            # 95% precision target (0.90): 69.8% coverage
+            # 98% precision target (0.96): 30.2% coverage
+            for t in [0.76, 0.90, 0.96]:
+                results.append(evaluate_matcher('tfidf-dense', corpus, queries, corp_id_to_name,
+                                                label=f'tfidf[sw=F]-rerank(n=5)+{short}[t={t}]',
+                                                dense_model_name=dm,
+                                                fusion='tfidf-rerank',
+                                                rerank_n=5,
+                                                remove_stopwords=False,
+                                                min_score=t))
+
             # BM25 + dense, weighted fusion
             results.append(evaluate_matcher('bm25-dense', corpus, queries, corp_id_to_name,
                                             label=f'bm25+{short}(w,0.5/0.5)',
@@ -185,11 +221,14 @@ if __name__ == '__main__':
         print(f"\n{'='*90}")
         print("COMPARISON SUMMARY")
         print(f"{'='*90}")
-        print(f"{'Model':<35} {'Top-1 Acc':>10} {'Top-3 Acc':>10} {'Avg Latency':>14}")
-        print(f"{'-'*90}")
-        
+        print(f"{'Model':<42} {'Top-1':>7} {'Coverage':>9} {'Precision@1':>12} {'Top-3':>7} {'Latency':>10}")
+        print(f"{'-'*95}")
+
         for r in results:
-            print(f"{r['model']:<35} {r['top1_accuracy']:>9.2f}% {r['top3_accuracy']:>9.2f}% {r['avg_latency']:>12.2f} ms")
+            cov = f"{r['coverage']:.1f}%" if r.get('coverage', 100.0) < 100.0 else "100.0%"
+            prec = f"{r['precision_top1']:.1f}%" if r.get('coverage', 100.0) < 100.0 else "—"
+            print(f"{r['model']:<42} {r['top1_accuracy']:>6.2f}% {cov:>9} {prec:>12} "
+                  f"{r['top3_accuracy']:>6.2f}% {r['avg_latency']:>9.2f}ms")
         
         best = max(results, key=lambda x: x['top1_accuracy'])
         print(f"\nBest Top-1: {best['model']}  →  {best['top1_accuracy']:.2f}%")
