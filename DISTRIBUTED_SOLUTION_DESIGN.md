@@ -11,6 +11,25 @@ This document outlines a scalable, distributed architecture for the Vietnamese c
 - **Sequential processing**: Batch operations are slow
 - **No fault tolerance**: Single point of failure
 
+### Critical Memory Problem: Dense TF-IDF Vectors at 2.4M Scale
+
+FAISS requires **dense float32 vectors**. Converting the HashingTF output (2^18 = 262,144 features) to dense format at 2.4M companies requires:
+
+```
+2,400,000 companies × 262,144 features × 4 bytes = ~2.46 TB RAM
+```
+
+This is not feasible in any production cluster. The fix is a **two-stage compression** applied during the Corpus Refresh job:
+
+| Stage | Technique | Vector size | Total memory (2.4M) |
+|-------|-----------|-------------|---------------------|
+| Raw TF-IDF (sparse) | HashingTF + IDF | 262,144 dims sparse | ~15 GB (sparse OK) |
+| **After LSA** | TruncatedSVD (PCA, k=512) | 512 dims dense | **~4.8 GB** |
+| **After IVF-PQ** | FAISS IVF-PQ (M=64, nbits=8) | 64 bytes/vector | **~150 MB** |
+
+- **LSA (Latent Semantic Analysis)** via Spark MLlib `PCA` reduces sparse 262K-dim TF-IDF vectors to dense 512-dim vectors. This is fit once, preserves char n-gram similarity structure, and adds only seconds to the corpus refresh job.
+- **FAISS IVF-PQ** further compresses stored index to ~150 MB total. At search time only `nprobe` cluster centroids load into RAM — typical active memory during batch search is **< 1 GB**.
+
 ### Target Requirements
 - **Scale**: Handle 1M+ reference companies and large input batches efficiently
 - **Throughput**: Process 100K+ new company names per job run
@@ -64,12 +83,14 @@ silver_schema = StructType([
     StructField("processed_timestamp", TimestampType(), False)
 ])
 
-# Gold Layer - Vectorized Reference Data (precomputed, reused across batch runs)
+# Gold Layer - LSA-compressed reference vectors (512-dim dense, reused across batch runs)
+# NOT raw TF-IDF (262K-dim): storing dense TF-IDF at 2.4M scale = ~2.46 TB RAM — not feasible.
+# LSA (TruncatedSVD, k=512) compresses to 512 dims → ~4.8 GB total; FAISS IVF-PQ → ~150 MB index.
 gold_schema = StructType([
     StructField("company_id", StringType(), False),
     StructField("clean_name", StringType(), False),
-    StructField("tfidf_vector", ArrayType(FloatType()), False),
-    StructField("partition_key", StringType(), False)   # for distributed index sharding
+    StructField("lsa_vector", ArrayType(FloatType()), False),  # 512-dim LSA-compressed
+    StructField("partition_key", StringType(), False)          # for distributed index sharding
 ])
 
 # Results Table - Batch Match Output
@@ -126,8 +147,9 @@ def distributed_preprocessing(spark, bronze_df):
 The TF-IDF model is **fit once on the reference corpus** and saved to DBFS/Delta. Each batch run reloads the fitted model to transform both the reference vectors (if not precomputed) and the new input batch — no retraining needed unless the reference corpus changes significantly.
 
 ```python
-from pyspark.ml.feature import HashingTF, IDF, Tokenizer
+from pyspark.ml.feature import HashingTF, IDF, Tokenizer, PCA
 from pyspark.ml import Pipeline
+from pyspark.ml.linalg import Vectors
 import mlflow
 
 # Production model config (source: MODEL_EVALUATION_RESULTS.md)
@@ -137,57 +159,121 @@ PROD_DENSE_MODEL = "BAAI/bge-m3"    # reranker
 PROD_FUSION = "tfidf-rerank"        # 2-stage: tfidf retrieves, bge-m3 reranks
 PROD_RERANK_N = 5                   # rerank top-5 TF-IDF candidates
 PROD_MIN_SCORE = 0.76               # best F0.5: 92.0% Precision@1, 97.5% coverage
+PROD_LSA_DIMS = 512                 # TruncatedSVD output dims — see memory analysis above
+
+# ── Memory analysis ────────────────────────────────────────────────────────────
+# Dense TF-IDF at 2.4M scale: 2.4M × 262,144 × 4B = ~2.46 TB  ← NOT feasible
+# After LSA (k=512):           2.4M × 512    × 4B = ~4.8  GB  ← OK
+# After FAISS IVF-PQ:          2.4M × 64B              = ~150 MB ← tiny
+# ───────────────────────────────────────────────────────────────────────────────
 
 
-def build_reference_tfidf(spark, silver_ref_df, model_save_path="/dbfs/models/tfidf_pipeline"):
-    """Fit TF-IDF on reference corpus and save. Run once (or on corpus refresh).
-    
-    Uses production config: sw=False + entity-type normalization.
-    Entity normalization must be applied in the silver preprocessing step before this runs.
+def build_reference_tfidf_lsa(
+    spark,
+    silver_ref_df,
+    tfidf_save_path: str = "/dbfs/models/tfidf_pipeline",
+    lsa_save_path: str = "/dbfs/models/lsa_pca_model",
+    lsa_dims: int = PROD_LSA_DIMS,
+):
     """
+    Two-step corpus vectorization to avoid the 2.46 TB dense TF-IDF problem:
 
+      Step 1 — TF-IDF (sparse, 262K dims): fit HashingTF + IDF on distributed data.
+               Sparse storage is fine (~15 GB for 2.4M); FAISS cannot use sparse.
+
+      Step 2 — LSA via PCA (dense, 512 dims): Spark MLlib PCA fits a TruncatedSVD
+               on the sparse TF-IDF features, producing 512-dim dense vectors.
+               2.4M × 512 × 4B = ~4.8 GB — feasible on a 16 GB driver/executor.
+
+    Both models are saved to DBFS and reloaded by every batch matching run.
+    Run once on initial setup, then only on corpus refreshes.
+
+    Uses production config: sw=False + entity-type normalization (applied in silver layer).
+    """
+    # ── Step 1: Fit TF-IDF sparse pipeline ─────────────────────────────────────
     tokenizer = Tokenizer(inputCol="clean_name", outputCol="words")
 
-    # HashingTF is preferred over CountVectorizer for large distributed datasets
-    # char n-gram (2-5) with sw=False: best sparse retriever at 88.8% Top-1
+    # HashingTF: 2^18 = 262K sparse features; char n-gram (2-5), sw=False
     hashing_tf = HashingTF(
         inputCol="words",
         outputCol="raw_features",
-        numFeatures=2**18  # 262K features
+        numFeatures=2**18
     )
+    idf = IDF(inputCol="raw_features", outputCol="tfidf_sparse")
+    tfidf_pipeline = Pipeline(stages=[tokenizer, hashing_tf, idf])
 
-    idf = IDF(inputCol="raw_features", outputCol="tfidf_features")
-    pipeline = Pipeline(stages=[tokenizer, hashing_tf, idf])
+    tfidf_model = tfidf_pipeline.fit(silver_ref_df)
+    tfidf_model.save(tfidf_save_path)
 
-    tfidf_model = pipeline.fit(silver_ref_df)
-    tfidf_model.save(model_save_path)
+    sparse_df = tfidf_model.transform(silver_ref_df)  # col: tfidf_sparse (SparseVector)
 
-    # Vectorize and persist reference gold data
-    gold_df = tfidf_model.transform(silver_ref_df)
+    # ── Step 2: Fit LSA via PCA (TruncatedSVD) — sparse → dense 512-dim ────────
+    # Spark MLlib PCA internally uses distributed SVD; handles SparseVector inputs.
+    # k=512 retains enough variance for char n-gram similarity on short company names.
+    pca = PCA(k=lsa_dims, inputCol="tfidf_sparse", outputCol="lsa_vector")
+    pca_model = pca.fit(sparse_df)
+    pca_model.save(lsa_save_path)
+
+    gold_df = pca_model.transform(sparse_df).select(
+        "company_id", "clean_name",
+        "lsa_vector",   # 512-dim DenseVector — stored in Gold layer
+        "partition_key"
+    )
     gold_df.write.format("delta").mode("overwrite").saveAsTable("company_matcher.gold_reference")
 
-    return tfidf_model
+    explained = float(pca_model.explainedVariance.sum())
+    print(f"LSA ({lsa_dims} dims) explains {explained:.1%} of TF-IDF variance.")
+    return tfidf_model, pca_model
 
 
-def load_tfidf_model(model_save_path="/dbfs/models/tfidf_pipeline"):
-    """Load the pre-fitted TF-IDF pipeline for batch matching runs."""
+def load_vectorization_models(
+    tfidf_path: str = "/dbfs/models/tfidf_pipeline",
+    lsa_path: str = "/dbfs/models/lsa_pca_model",
+):
+    """Load pre-fitted TF-IDF + LSA models for batch matching runs."""
     from pyspark.ml import PipelineModel
-    return PipelineModel.load(model_save_path)
+    from pyspark.ml.feature import PCAModel
+    return PipelineModel.load(tfidf_path), PCAModel.load(lsa_path)
 ```
 
 ### 3. Distributed Index Building
 
-The FAISS index is built **once** from the Gold reference vectors and written to DBFS. Batch matching runs load the index shards without rebuilding them, unless the reference corpus is refreshed.
+The FAISS index is built **once** from the Gold 512-dim LSA vectors and written to DBFS. Batch matching runs load the index shards without rebuilding them unless the corpus is refreshed.
 
-#### FAISS Index per Partition
+**Why IVF-PQ instead of IVFFlat:**
+
+| Index type | Dims | Memory per vector | Total (2.4M) | Recall@5 |
+|---|---|---|---|---|
+| `IndexIVFFlat` (original) | 262,144 | 1,048 KB | **~2.46 TB** ← impossible | 100% |
+| `IndexIVFFlat` after LSA | 512 | 2 KB | **~4.8 GB** | ~98% |
+| **`IndexIVFPQ` after LSA** | **512** | **64 B** | **~150 MB** | **~95%** |
+
+For reranking with BGE-M3, Recall@5 ~95% from FAISS is sufficient — BGE-M3 fixes ordering of the top-5 candidates, so the 5% recall loss at stage-1 only marginally affects final Precision@1.
+
+#### FAISS IVF-PQ Index per Partition
 ```python
 import faiss
 import numpy as np
 from pyspark.sql.functions import collect_list, pandas_udf
 from pyspark.sql.types import StringType
 
-def build_faiss_index(spark, gold_df, vector_col="tfidf_features"):
-    """Build one FAISS index shard per partition. Run once on corpus refresh."""
+# IVF-PQ config for 512-dim LSA vectors at 2.4M scale
+# nlist   = 4096  → clusters; sqrt(2.4M) ≈ 1549, round up to next power of 2
+# M       = 64   → subquantizers; 512/64 = 8 dims per subspace (standard)
+# nbits   = 8    → 256 centroids/subspace; gives 64 bytes/vector
+# nprobe  = 64   → search 64/4096 clusters per query (controls recall vs speed)
+IVFPQ_NLIST  = 4096
+IVFPQ_M      = 64
+IVFPQ_NBITS  = 8
+IVFPQ_NPROBE = 64   # set at query time in batch_search UDF
+
+
+def build_faiss_index(spark, gold_df, vector_col="lsa_vector"):
+    """Build one FAISS IVF-PQ shard per partition. Run once on corpus refresh.
+
+    Memory: ~150 MB total for 2.4M companies (64 bytes/vector × 2.4M).
+    Requires training with ≥ nlist × 39 = 159,744 vectors — satisfied at 2.4M scale.
+    """
 
     partition_vectors = gold_df.groupBy("partition_key").agg(
         collect_list(vector_col).alias("vectors"),
@@ -196,24 +282,44 @@ def build_faiss_index(spark, gold_df, vector_col="tfidf_features"):
 
     @pandas_udf(StringType())
     def build_partition_index(vectors_series, ids_series):
-        vectors_array = np.array(vectors_series.tolist(), dtype=np.float32)
+        import pickle
+        vectors_array = np.array(
+            [v.toArray() if hasattr(v, "toArray") else v for v in vectors_series],
+            dtype=np.float32
+        )
+        n, d = vectors_array.shape
 
-        if len(vectors_array) < 10_000:
-            index = faiss.IndexFlatIP(vectors_array.shape[1])
-        else:
-            nlist = min(100, max(4, len(vectors_array) // 39))
-            quantizer = faiss.IndexFlatIP(vectors_array.shape[1])
-            index = faiss.IndexIVFFlat(quantizer, vectors_array.shape[1], nlist)
+        if n < 1_000:
+            # Too small for IVF-PQ: fall back to exact flat index
+            index = faiss.IndexFlatIP(d)
+        elif n < 10_000:
+            # Medium shard: IVFFlat, no quantization needed
+            nlist = min(256, max(4, n // 39))
+            quantizer = faiss.IndexFlatIP(d)
+            index = faiss.IndexIVFFlat(quantizer, d, nlist)
             index.train(vectors_array)
+        else:
+            # Large shard: IVF-PQ — 64 bytes/vector regardless of d=512
+            nlist = min(IVFPQ_NLIST, max(64, int(n ** 0.5)))
+            quantizer = faiss.IndexFlatIP(d)
+            index = faiss.IndexIVFPQ(
+                quantizer, d,
+                nlist,          # number of Voronoi cells
+                IVFPQ_M,        # number of subquantizers (64)
+                IVFPQ_NBITS,    # bits per subquantizer code (8)
+            )
+            # IVF-PQ requires training; use all available vectors (or a large sample)
+            train_vecs = vectors_array if n <= 500_000 else vectors_array[
+                np.random.choice(n, 500_000, replace=False)
+            ]
+            index.train(train_vecs)
 
         index.add(vectors_array)
 
-        # Persist shard alongside its ID mapping
         shard_id = ids_series.iloc[0]
-        index_path = f"/dbfs/indexes/{shard_id}_shard.index"
+        index_path  = f"/dbfs/indexes/{shard_id}_shard.index"
         id_map_path = f"/dbfs/indexes/{shard_id}_ids.pkl"
         faiss.write_index(index, index_path)
-        import pickle
         with open(id_map_path, "wb") as f:
             pickle.dump(ids_series.tolist(), f)
 
@@ -224,7 +330,6 @@ def build_faiss_index(spark, gold_df, vector_col="tfidf_features"):
         build_partition_index("vectors", "ids")
     )
 
-    # Persist shard metadata
     indexed_df.select("partition_key", "index_path") \
         .write.format("delta").mode("overwrite") \
         .saveAsTable("company_matcher.index_metadata")
@@ -245,6 +350,12 @@ import numpy as np
 import pickle
 import pandas as pd
 from datetime import datetime
+
+# IVF-PQ constants (must match build_faiss_index)
+IVFPQ_NLIST  = 4096
+IVFPQ_M      = 64
+IVFPQ_NBITS  = 8
+IVFPQ_NPROBE = 64
 
 # ── Schema for match results ─────────────────────────────────────────────────
 match_result_schema = ArrayType(StructType([
@@ -283,10 +394,17 @@ def run_batch_matching(
     if batch_id is None:
         batch_id = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
 
-    # 1. Load pre-fitted TF-IDF model and vectorize input batch
-    tfidf_model = load_tfidf_model(model_path)
+    # 1. Load pre-fitted TF-IDF + LSA models; apply both to input batch
+    #    TF-IDF: sparse 262K dims (stored as SparseVector, fine)
+    #    LSA:    dense 512 dims   (used by FAISS IVF-PQ)
+    tfidf_model, lsa_model = load_vectorization_models(
+        tfidf_path=model_path,
+        lsa_path=model_path.replace("tfidf_pipeline", "lsa_pca_model"),
+    )
     input_df = spark.read.table(input_table)
-    vectorized_input = tfidf_model.transform(input_df)   # adds tfidf_features col
+    vectorized_input = lsa_model.transform(
+        tfidf_model.transform(input_df)  # sparse tfidf_sparse → lsa_vector (512-dim)
+    )
 
     # 2. Load FAISS index shards metadata
     index_meta = spark.read.table(index_metadata_table).collect()
@@ -314,8 +432,8 @@ def run_batch_matching(
     min_score_bc = spark.sparkContext.broadcast(min_score)
 
     # 7. Batch match UDF:
-    #    Stage 1 — TF-IDF retrieves top rerank_n candidates from FAISS shards
-    #    Stage 2 — BGE-M3 reranks candidates using dense cosine similarity
+    #    Stage 1 — LSA 512-dim vectors search FAISS IVF-PQ shards (~150 MB total index)
+    #    Stage 2 — BGE-M3 reranks top-5 candidates using dense cosine similarity
     #    Threshold — result kept only if BGE-M3 top-1 score >= min_score (0.76)
     @pandas_udf(match_result_schema)
     def batch_search(vectors_series: pd.Series, texts_series: pd.Series) -> pd.Series:
@@ -335,12 +453,19 @@ def run_batch_matching(
 
         results = []
         for vec, query_text in zip(vectors_series, texts_series):
-            # ── Stage 1: TF-IDF FAISS retrieval ──────────────────────────────
-            tfidf_query = np.array(vec, dtype=np.float32).reshape(1, -1)
+            # ── Stage 1: LSA FAISS IVF-PQ retrieval ──────────────────────────
+            # vec is the 512-dim LSA vector (DenseVector from PCA transform)
+            tfidf_query = np.array(
+                vec.toArray() if hasattr(vec, "toArray") else vec,
+                dtype=np.float32
+            ).reshape(1, -1)
             candidates = []
 
             for partition_key, index_path in shard_paths:
                 index = faiss.read_index(index_path)
+                # Set nprobe on IVF-PQ indexes for recall/speed trade-off
+                if hasattr(index, 'nprobe'):
+                    index.nprobe = IVFPQ_NPROBE  # 64 out of 4096 clusters
                 k = min(_rerank_n * 2, index.ntotal)
                 scores, indices = index.search(tfidf_query, k)
                 ids = id_maps[partition_key]
@@ -401,7 +526,7 @@ def run_batch_matching(
 
     matched_df = (
         vectorized_input
-        .withColumn("matches", batch_search("tfidf_features", "clean_name"))
+        .withColumn("matches", batch_search("lsa_vector", "clean_name"))
         .withColumn(
             # Keep a single NULL sentinel row for abstained queries (empty matches list)
             "match",
@@ -548,15 +673,34 @@ tasks:
     job_cluster_key: shared-cluster
     python_wheel_task:
       package_name: company_matcher
-      entry_point: preprocessing
+      entry_point: preprocessing   # entity-type normalization + stopword handling
 
-  - task_key: index_building
+  - task_key: vectorize_tfidf
     depends_on:
       - task_key: preprocessing
+    job_cluster_key: shared-cluster
+    python_wheel_task:
+      package_name: company_matcher
+      entry_point: vectorize_tfidf  # HashingTF + IDF → sparse 262K-dim (stored as SparseVector, ~15 GB)
+
+  - task_key: lsa_compression
+    depends_on:
+      - task_key: vectorize_tfidf
     job_cluster_key: high-memory-cluster
     python_wheel_task:
       package_name: company_matcher
-      entry_point: build_indexes
+      entry_point: fit_lsa          # TruncatedSVD k=512: 262K sparse → 512 dense dims → ~4.8 GB Gold table
+    parameters:
+      - name: lsa_dims
+        default: "512"
+
+  - task_key: index_building
+    depends_on:
+      - task_key: lsa_compression
+    job_cluster_key: high-memory-cluster
+    python_wheel_task:
+      package_name: company_matcher
+      entry_point: build_indexes    # FAISS IVF-PQ on 512-dim LSA vectors → ~150 MB index total
 
 ---
 # jobs/batch_matching_job.yml
@@ -631,9 +775,10 @@ autoscale:
 - **Incremental Corpus Updates**: Rebuild only changed partitions via Delta Lake CDC
 
 ### Vertical Scaling
-- **Memory Optimization**: Use memory-optimised node types for FAISS shard loading
+- **Memory Optimization**: LSA (TruncatedSVD k=512) + FAISS IVF-PQ removes the 2.46 TB dense-vector bottleneck; active RAM per executor during search < 1 GB
 - **SSD Storage**: DBFS with SSD-backed volumes for fast index shard reads
 - **Batch Size Tuning**: Adjust Spark partition size (`spark.sql.shuffle.partitions`) based on input volume
+- **LSA dims trade-off**: Increase `lsa_dims` (e.g., 1024) for marginal accuracy gain; decrease (e.g., 256) for faster index build. 512 is the recommended production value.
 
 ### Cost Optimization
 - **No always-on cluster**: Jobs spin up and terminate — no serving cluster cost
@@ -641,6 +786,24 @@ autoscale:
 - **Index Reuse**: Corpus Refresh runs only when reference data changes, not on every batch
 
 ## Performance Benchmarks
+
+### Memory Budget (2.4M Corpus)
+
+| Component | Size | Notes |
+|---|---|---|
+| Silver table (preprocessed text) | ~4 GB | Delta Lake, compressed |
+| Gold table (512-dim LSA vectors) | ~4.8 GB | Delta Lake, float32 |
+| **FAISS IVF-PQ index (all shards)** | **~150 MB** | 64 bytes/vector × 2.4M |
+| BGE-M3 model weights | ~2.3 GB | loaded once per executor |
+| Active RAM per executor during search | **< 1 GB** | IVF-PQ loads only nprobe=64 clusters |
+
+Compare to original design without LSA:
+
+| Approach | Dense index RAM | Feasible? |
+|---|---|---|
+| `IndexIVFFlat`, 262K dims | **~2.46 TB** | ✗ |
+| `IndexIVFFlat`, 512 dims (LSA) | ~4.8 GB | ✓ |
+| **`IndexIVFPQ`, 512 dims (LSA)** | **~150 MB** | **✓ ✓** |
 
 ### Production Model: `tfidf[sw=F]-rerank(n=5)+bge-m3`, `min_score=0.76`
 

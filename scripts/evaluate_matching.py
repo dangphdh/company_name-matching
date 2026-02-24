@@ -4,7 +4,7 @@ import os
 from tqdm import tqdm
 from src.matching.matcher import CompanyMatcher
 
-def evaluate_matcher(corpus_file, queries_file, model_name='BAAI/bge-m3', remove_stopwords=True):
+def evaluate_matcher(corpus_file, queries_file, model_name='BAAI/bge-m3', remove_stopwords=True, lsa_dims=512):
     """
     Đánh giá độ chính xác của thuật toán matching trên dataset đã sinh.
     """
@@ -33,7 +33,7 @@ def evaluate_matcher(corpus_file, queries_file, model_name='BAAI/bge-m3', remove
     print(f"Bắt đầu đánh giá với {len(corpus)} cty và {len(queries)} query mẫu...")
 
     # 3. Build Matcher (Sử dụng model nhỏ hơn hoặc cache nếu cần, ở đây dùng mặc định)
-    matcher = CompanyMatcher(model_name=model_name, remove_stopwords=remove_stopwords)
+    matcher = CompanyMatcher(model_name=model_name, remove_stopwords=remove_stopwords, lsa_dims=lsa_dims)
     matcher.build_index(corpus)
 
     # 4. Run Evaluation
@@ -84,6 +84,8 @@ def evaluate_matcher(corpus_file, queries_file, model_name='BAAI/bge-m3', remove
     print("="*30)
     print(f"Model: {model_name}")
     print(f"Remove Stopwords: {remove_stopwords}")
+    if model_name in ('tfidf-lsa', 'lsa'):
+        print(f"LSA dims: {lsa_dims}")
     print(f"Tổng số queries: {len(queries)}")
     print(f"Số lỗi (Top 1): {len(results_analysis)}")
     print(f"Accuracy (Top 1): {accuracy:.2%}")
@@ -149,3 +151,20 @@ if __name__ == "__main__":
         model_name="keepitreal/vietnamese-sbert",
         remove_stopwords=True
     )
+
+    # ── TF-IDF + LSA tests ───────────────────────────────────────────────────
+    # Tests the dimensionality-reduction path that makes large-scale deployment
+    # feasible (2.4M corpus: dense TF-IDF = ~2.46 TB; LSA k=512 = ~4.8 GB).
+
+    for dims in (128, 256, 512):
+        for sw in (False, True):
+            sw_label = "sw=F" if not sw else "sw=T"
+            print("\n" + "="*50)
+            print(f"--- Testing TF-IDF + LSA (k={dims}, {sw_label}) ---")
+            evaluate_matcher(
+                corpus_file="data/eval/corpus.jsonl",
+                queries_file="data/eval/queries.jsonl",
+                model_name="tfidf-lsa",
+                remove_stopwords=sw,
+                lsa_dims=dims,
+            )

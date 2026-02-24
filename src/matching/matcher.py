@@ -62,7 +62,8 @@ class CompanyMatcher:
                  sparse_weight=0.5, dense_weight=0.5,
                  fusion='weighted',
                  rerank_n=10,
-                 rerank_threshold=0.05):
+                 rerank_threshold=0.05,
+                 lsa_dims=512):
         """
         Khởi tạo mô hình matching.
 
@@ -86,6 +87,10 @@ class CompanyMatcher:
                                     (e.g. BAAI/bge-reranker-base) rescores each pair
             rerank_n: Candidates retrieved per retriever for rerank strategies
             rerank_threshold: Score gap below which adaptive-rerank triggers (default 0.05)
+            lsa_dims: Number of LSA (TruncatedSVD) dimensions for 'tfidf-lsa' model.
+                      512 is the recommended value for 2.4M-scale corpora where
+                      storing dense TF-IDF vectors (~2.5 TB) is not feasible.
+                      Ignored for all other model_name values.
         """
         self.model_name = model_name
         self.use_gpu = use_gpu
@@ -98,11 +103,21 @@ class CompanyMatcher:
         self.fusion = fusion
         self.rerank_n = rerank_n
         self.rerank_threshold = rerank_threshold
+        self.lsa_dims = lsa_dims
         self.index = None
         self.corpus_names = []
         self.corpus_vectors = None
         
-        if model_name == 'tfidf' or model_name == 'tfidf-char-ngram':
+        if model_name in ('tfidf-lsa', 'lsa'):
+            print(f"Using TF-IDF + LSA (TruncatedSVD k={lsa_dims}) Matcher...")
+            self.svd = None  # fitted in build_index
+            self.vectorizer = TfidfVectorizer(
+                analyzer='char',
+                ngram_range=(2, 5),
+                sublinear_tf=True,
+                min_df=1
+            )
+        elif model_name == 'tfidf' or model_name == 'tfidf-char-ngram':
             print(f"Using Pure Python/Sklearn TF-IDF Matcher...")
             self.vectorizer = TfidfVectorizer(
                 analyzer='char', 
@@ -230,8 +245,23 @@ class CompanyMatcher:
             self._norm_to_originals.setdefault(key, []).append(i)
 
         print(f"Vectorizing {len(processed_names)} variants for {len(names)} companies...")
-        
-        if self.model_name == 'tfidf':
+
+        if self.model_name in ('tfidf-lsa', 'lsa'):
+            from sklearn.decomposition import TruncatedSVD
+            # Step 1: sparse TF-IDF (only ~15 GB for 2.4M at 262K dims — OK as sparse)
+            tfidf_sparse = self.vectorizer.fit_transform(processed_names)
+            # Step 2: LSA — sparse 262K dims → dense lsa_dims dims
+            self.svd = TruncatedSVD(n_components=self.lsa_dims, random_state=42)
+            lsa_dense = self.svd.fit_transform(tfidf_sparse)  # (n_variants, lsa_dims)
+            # L2-normalize so cosine similarity = dot product
+            norms = np.linalg.norm(lsa_dense, axis=1, keepdims=True)
+            norms[norms == 0] = 1.0
+            self.corpus_vectors = (lsa_dense / norms).astype(np.float32)
+            explained = float(self.svd.explained_variance_ratio_.sum())
+            print(f"  LSA {self.lsa_dims} dims: {explained:.1%} of TF-IDF variance explained.")
+            print(f"  Corpus vector matrix: {self.corpus_vectors.shape}, "
+                  f"{self.corpus_vectors.nbytes / 1e9:.2f} GB")
+        elif self.model_name == 'tfidf':
             self.corpus_vectors = self.vectorizer.fit_transform(processed_names)
         elif self.model_name == 'tfidf-bm25' or self.model_name == 'hybrid':
             # Hybrid: Build both TF-IDF and BM25 indices
@@ -291,8 +321,16 @@ class CompanyMatcher:
                        Default 0.0 (no filtering, backward-compatible).
         """
         query_cleaned = clean_company_name(query, remove_stopwords=self.remove_stopwords)
-        
-        if self.model_name == 'tfidf':
+
+        if self.model_name in ('tfidf-lsa', 'lsa'):
+            # TF-IDF sparse → LSA dense → L2-normalize → dot product = cosine similarity
+            tfidf_q = self.vectorizer.transform([query_cleaned])
+            lsa_q = self.svd.transform(tfidf_q).astype(np.float32)  # (1, lsa_dims)
+            norm_q = np.linalg.norm(lsa_q)
+            if norm_q > 0:
+                lsa_q = lsa_q / norm_q
+            similarities = (self.corpus_vectors @ lsa_q.T).flatten()
+        elif self.model_name == 'tfidf':
             query_vec = self.vectorizer.transform([query_cleaned])
             similarities = cosine_similarity(query_vec, self.corpus_vectors).flatten()
         elif self.model_name == 'tfidf-bm25' or self.model_name == 'hybrid':
