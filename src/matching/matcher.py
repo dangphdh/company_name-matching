@@ -586,6 +586,190 @@ class CompanyMatcher:
 
         return results
 
+    def save_index(self, path: str):
+        """
+        Save the built index to disk for later reuse.
+
+        This saves:
+        - TfidfVectorizer model
+        - SVD model (if using LSA)
+        - Dense embeddings (if using dense model)
+        - Corpus metadata (names, mappings)
+
+        Args:
+            path: Directory path to save index files
+        """
+        import pickle
+        import joblib
+        from pathlib import Path
+
+        index_path = Path(path)
+        index_path.mkdir(parents=True, exist_ok=True)
+
+        print(f"[CompanyMatcher] Saving index to: {index_path}")
+
+        # Save vectorizer
+        if self.vectorizer is not None:
+            joblib.dump(self.vectorizer, index_path / "vectorizer.joblib")
+            print(f"[CompanyMatcher] Saved vectorizer")
+
+        # Save SVD model (if using LSA)
+        if self.svd is not None:
+            joblib.dump(self.svd, index_path / "svd.joblib")
+            print(f"[CompanyMatcher] Saved SVD model")
+
+        # Save dense vectors (if using dense model)
+        if hasattr(self, 'dense_vectors') and self.dense_vectors is not None:
+            np.save(index_path / "dense_vectors.npy", self.dense_vectors)
+            print(f"[CompanyMatcher] Saved dense vectors: {self.dense_vectors.shape}")
+
+        # Save corpus vectors
+        if self.corpus_vectors is not None:
+            np.save(index_path / "corpus_vectors.npy", self.corpus_vectors)
+            print(f"[CompanyMatcher] Saved corpus vectors: {self.corpus_vectors.shape}")
+
+        # Save BM25 model (if exists)
+        if hasattr(self, 'bm25_model') and self.bm25_model is not None:
+            with open(index_path / "bm25_model.pkl", 'wb') as f:
+                pickle.dump(self.bm25_model, f)
+            print(f"[CompanyMatcher] Saved BM25 model")
+
+        # Save corpus metadata
+        metadata = {
+            'corpus_names': self.corpus_names,
+            'name_mapping': self.name_mapping,
+            '_orig_to_norm': self._orig_to_norm,
+            '_norm_to_originals': self._norm_to_originals,
+            'model_name': self.model_name,
+            'lsa_dims': self.lsa_dims,
+            'remove_stopwords': self.remove_stopwords,
+            'use_gpu': self.use_gpu,
+            'dense_model_name': self.dense_model_name,
+            'sparse_weight': self.sparse_weight,
+            'dense_weight': self.dense_weight,
+            'fusion': self.fusion,
+            'rerank_n': self.rerank_n,
+            'rerank_threshold': self.rerank_threshold
+        }
+
+        # Save processed names if available (needed for cross-rerank)
+        if hasattr(self, '_processed_names'):
+            metadata['_processed_names'] = self._processed_names
+
+        with open(index_path / "metadata.pkl", 'wb') as f:
+            pickle.dump(metadata, f)
+        print(f"[CompanyMatcher] Saved metadata ({len(self.corpus_names)} companies)")
+
+        print(f"[CompanyMatcher] Index saved successfully")
+
+    @classmethod
+    def load_index(cls, path: str):
+        """
+        Load a previously saved index from disk.
+
+        Args:
+            path: Directory path containing saved index files
+
+        Returns:
+            CompanyMatcher instance with loaded index
+        """
+        import pickle
+        import joblib
+        from pathlib import Path
+
+        index_path = Path(path)
+
+        if not index_path.exists():
+            raise FileNotFoundError(f"Index path not found: {index_path}")
+
+        print(f"[CompanyMatcher] Loading index from: {index_path}")
+
+        # Load metadata first
+        with open(index_path / "metadata.pkl", 'rb') as f:
+            metadata = pickle.load(f)
+
+        print(f"[CompanyMatcher] Loaded metadata for {len(metadata['corpus_names'])} companies")
+
+        # Create matcher instance with saved config
+        matcher = cls(
+            model_name=metadata['model_name'],
+            lsa_dims=metadata.get('lsa_dims', 512),
+            remove_stopwords=metadata['remove_stopwords'],
+            use_gpu=metadata.get('use_gpu', False),
+            dense_model_name=metadata.get('dense_model_name', 'BAAI/bge-m3'),
+            sparse_weight=metadata.get('sparse_weight', 0.5),
+            dense_weight=metadata.get('dense_weight', 0.5),
+            fusion=metadata.get('fusion', 'weighted'),
+            rerank_n=metadata.get('rerank_n', 10),
+            rerank_threshold=metadata.get('rerank_threshold', 0.05)
+        )
+
+        # Restore metadata
+        matcher.corpus_names = metadata['corpus_names']
+        matcher.name_mapping = metadata['name_mapping']
+        matcher._orig_to_norm = metadata['_orig_to_norm']
+        matcher._norm_to_originals = metadata['_norm_to_originals']
+
+        # Restore processed names if available
+        if '_processed_names' in metadata:
+            matcher._processed_names = metadata['_processed_names']
+
+        # Load vectorizer
+        vectorizer_path = index_path / "vectorizer.joblib"
+        if vectorizer_path.exists():
+            matcher.vectorizer = joblib.load(vectorizer_path)
+            print(f"[CompanyMatcher] Loaded vectorizer")
+
+        # Load SVD model (if exists)
+        svd_path = index_path / "svd.joblib"
+        if svd_path.exists():
+            matcher.svd = joblib.load(svd_path)
+            print(f"[CompanyMatcher] Loaded SVD model")
+
+        # Load corpus vectors
+        vectors_path = index_path / "corpus_vectors.npy"
+        if vectors_path.exists():
+            matcher.corpus_vectors = np.load(vectors_path)
+            print(f"[CompanyMatcher] Loaded corpus vectors: {matcher.corpus_vectors.shape}")
+
+        # Load dense vectors (if exists)
+        dense_path = index_path / "dense_vectors.npy"
+        if dense_path.exists():
+            matcher.dense_vectors = np.load(dense_path)
+            print(f"[CompanyMatcher] Loaded dense vectors: {matcher.dense_vectors.shape}")
+
+        # Load BM25 model (if exists)
+        bm25_path = index_path / "bm25_model.pkl"
+        if bm25_path.exists():
+            with open(bm25_path, 'rb') as f:
+                matcher.bm25_model = pickle.load(f)
+            print(f"[CompanyMatcher] Loaded BM25 model")
+
+        # Load SentenceTransformer/CrossEncoder model (if using dense model)
+        if metadata['model_name'] in ['tfidf-dense', 'bm25-dense']:
+            from sentence_transformers import SentenceTransformer
+
+            dense_model_name = metadata.get('dense_model_name', 'BAAI/bge-m3')
+
+            if matcher.fusion == 'cross-rerank':
+                from sentence_transformers import CrossEncoder
+                matcher.cross_encoder = CrossEncoder(
+                    dense_model_name,
+                    device='cuda' if matcher.use_gpu else 'cpu'
+                )
+                print(f"[CompanyMatcher] Loaded CrossEncoder: {dense_model_name}")
+            elif hasattr(matcher, 'st_model'):
+                matcher.st_model = SentenceTransformer(
+                    dense_model_name,
+                    device='cuda' if matcher.use_gpu else 'cpu'
+                )
+                print(f"[CompanyMatcher] Loaded SentenceTransformer: {dense_model_name}")
+
+        print(f"[CompanyMatcher] Index loaded successfully")
+
+        return matcher
+
+
 if __name__ == "__main__":
     # Demo
     corpus = [

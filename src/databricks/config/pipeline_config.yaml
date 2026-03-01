@@ -1,0 +1,108 @@
+# Databricks Company Name Matching Pipeline Configuration
+# This file contains default configuration for the pipeline.
+# For environment-specific settings, use profiles (dev/staging/prod).
+
+version: "1.0.0"
+
+# Default pipeline configuration
+pipeline:
+  # Model configuration
+  model_name: "tfidf-lsa"  # LSA for 2M scale (CPU-only)
+  lsa_dims: 512  # Reduces memory from 8TB to ~4GB
+  remove_stopwords: true
+  use_gpu: false  # CPU-only as per requirements
+
+  # Dense model (optional, for future hybrid approaches)
+  dense_model_name: "BAAI/bge-m3"
+  fusion: "adaptive-rerank"
+  rerank_n: 50
+  rerank_threshold: 0.08  # Trigger reranking if top-2 gap < 8%
+
+  # Matching parameters
+  top_k: 5
+  min_score: 0.0
+
+  # Delta Lake paths (adjust for your environment)
+  bronze_path: "/delta/bronze/banking_transactions"
+  silver_path: "/delta/silver/companies_cleaned"
+  gold_index_path: "/delta/gold/company_index"
+  gold_matches_path: "/delta/gold/transaction_matches"
+
+  # Stage configurations
+  stage1_partitions: 200  # Target partitions after preprocessing
+  stage2_dedup_strategy: "first"  # Keep first occurrence
+  stage3_batch_size: 10000
+
+  # Performance tuning
+  shuffle_partitions: 200
+  adaptive_query: true
+  arrow_enabled: true
+
+  # Monitoring and alerting
+  log_level: "INFO"
+  enable_metrics: true
+  alert_threshold_avg_score: 0.85  # Alert if avg score drops below 85%
+  alert_threshold_high_confidence: 0.90  # Alert if high-confidence matches < 90%
+
+# Environment-specific profiles
+profiles:
+  # Development profile (smaller datasets, verbose logging)
+  dev:
+    model_name: "tfidf"  # Faster for testing
+    lsa_dims: 128  # Smaller for dev
+    stage1_partitions: 10
+    shuffle_partitions: 10
+    log_level: "DEBUG"
+    enable_metrics: true
+
+  # Staging profile (test with production-like data)
+  staging:
+    model_name: "tfidf-lsa"
+    lsa_dims: 256  # Medium size
+    stage1_partitions: 100
+    shuffle_partitions: 100
+    log_level: "INFO"
+    enable_metrics: true
+
+  # Production profile (full scale)
+  prod:
+    model_name: "tfidf-lsa"
+    lsa_dims: 512  # Full LSA for 2M companies
+    stage1_partitions: 400  # More partitions for 2M scale
+    shuffle_partitions: 400
+    log_level: "WARNING"  # Less verbose
+    enable_metrics: true
+    alert_threshold_avg_score: 0.85
+    alert_threshold_high_confidence: 0.90
+
+# Databricks-specific configuration
+databricks:
+  # Cluster configuration (read from environment variables if not set)
+  cluster_id: null  # Read from DATABRICKS_CLUSTER_ID env var
+  workspace_url: null  # Read from DATABRICKS_WORKSPACE_URL env var
+  token: null  # Read from DATABRICKS_TOKEN env var
+
+  # Cluster resource settings (for job submission)
+  driver_node_type_id: "Standard_D4s_v5"  # 4 cores, 16GB RAM
+  worker_node_type_id: "Standard_D16s_v5"  # 16 cores, 64GB RAM
+  min_workers: 5
+  max_workers: 20
+  autoscale: true
+  auto_termination_minutes: 30
+
+  # Spark configuration
+  spark_conf:
+    "spark.driver.memory": "16g"
+    "spark.executor.memory": "60g"
+    "spark.executor.memoryOverhead": "4g"
+    "spark.driver.maxResultSize": "8g"
+    "spark.sql.shuffle.partitions": "400"
+    "spark.sql.adaptive.enabled": "true"
+    "spark.sql.adaptive.coalescePartitions.enabled": "true"
+
+# Local testing configuration (for development without Databricks)
+local:
+  app_name: "LocalCompanyMatching"
+  driver_memory: "4g"
+  executor_memory: "4g"
+  cores: 4

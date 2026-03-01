@@ -1,0 +1,30 @@
+# Databricks Batch Processing Pipeline Requirements
+# Install with: pip install -r requirements-spark-databricks.txt
+
+# Core Spark dependencies (usually pre-installed on Databricks)
+# pyspark>=3.5.0
+# delta-spark>=3.0.0
+
+# Databricks Connect (for local development - optional)
+# Install specific version matching your cluster runtime:
+# - Databricks Runtime 14.0: pip install databricks-connect==14.0.*
+# - Databricks Runtime 15.0: pip install databricks-connect==15.0.*
+# Uncomment if developing locally against remote cluster:
+databricks-connect>=14.0.0
+
+# Databricks SDK (for cluster management - optional)
+databricks-sdk>=0.20.0
+
+# Machine Learning (usually pre-installed on Databricks)
+# scikit-learn>=1.5.0
+# numpy>=1.24.0
+
+# NLP and embeddings (optional, for future enhancements)
+# sentence-transformers>=2.7.0
+# FlagEmbedding  # For BGE-M3 native support
+
+# YAML configuration
+pyyaml>=6.0
+
+# Utilities (usually pre-installed on Databricks)
+# python-dateutil>=2.8.0

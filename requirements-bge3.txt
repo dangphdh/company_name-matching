@@ -1,0 +1,20 @@
+# BGE-M3 Embedding Model Dependencies
+# BAAI General Embedding - Multilingual v3
+# Supports 100+ languages including Vietnamese
+
+# Core library for BGE-M3
+FlagEmbedding>=1.2.0
+
+# Dependencies (automatically installed with FlagEmbedding)
+# torch>=2.0.0
+# transformers>=4.37.0
+# sentencepiece>=0.1.99
+# accelerate>=0.24.0
+
+# Optional: For better performance
+# onnxruntime>=1.16.0  # For ONNX Runtime inference
+# optimum>=1.16.0       # For model optimization
+
+# Note: BGE-M3 model will be downloaded automatically on first use
+# Model size: ~2.3 GB (1024-dimensional embeddings)
+# Language support: 100+ languages (including Vietnamese)
