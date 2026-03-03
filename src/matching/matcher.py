@@ -63,7 +63,8 @@ class CompanyMatcher:
                  fusion='weighted',
                  rerank_n=10,
                  rerank_threshold=0.05,
-                 lsa_dims=512):
+                 lsa_dims=512,
+                 max_features=100000):
         """
         Khởi tạo mô hình matching.
 
@@ -91,11 +92,16 @@ class CompanyMatcher:
                       512 is the recommended value for 2.4M-scale corpora where
                       storing dense TF-IDF vectors (~2.5 TB) is not feasible.
                       Ignored for all other model_name values.
+            max_features: Maximum vocabulary size for TF-IDF vectorization.
+                         Reduces memory usage for LSA models by limiting sparse matrix size.
+                         Default 100000 (reduces memory from ~20GB to ~11GB for 2.4M companies).
+                         Set to None for unlimited vocabulary (may cause OOM on large corpora).
         """
         self.model_name = model_name
         self.use_gpu = use_gpu
         self.remove_stopwords = remove_stopwords
         self.tfidf_weight = tfidf_weight
+        self.max_features = max_features
         self.bm25_weight = bm25_weight
         self.dense_model_name = dense_model_name
         self.sparse_weight = sparse_weight
@@ -115,7 +121,8 @@ class CompanyMatcher:
                 analyzer='char',
                 ngram_range=(2, 5),
                 sublinear_tf=True,
-                min_df=1
+                min_df=1,
+                max_features=self.max_features
             )
         elif model_name == 'tfidf' or model_name == 'tfidf-char-ngram':
             print(f"Using Pure Python/Sklearn TF-IDF Matcher...")
@@ -642,6 +649,7 @@ class CompanyMatcher:
             '_norm_to_originals': self._norm_to_originals,
             'model_name': self.model_name,
             'lsa_dims': self.lsa_dims,
+            'max_features': self.max_features,
             'remove_stopwords': self.remove_stopwords,
             'use_gpu': self.use_gpu,
             'dense_model_name': self.dense_model_name,
@@ -694,6 +702,7 @@ class CompanyMatcher:
         matcher = cls(
             model_name=metadata['model_name'],
             lsa_dims=metadata.get('lsa_dims', 512),
+            max_features=metadata.get('max_features', 100000),
             remove_stopwords=metadata['remove_stopwords'],
             use_gpu=metadata.get('use_gpu', False),
             dense_model_name=metadata.get('dense_model_name', 'BAAI/bge-m3'),
