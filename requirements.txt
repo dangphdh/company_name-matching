@@ -1,3 +1,4 @@
+# Core dependencies for Vietnamese Company Name Matching
 openai
 pyyaml
 pandas
@@ -11,3 +12,8 @@ beautifulsoup4
 requests
 sentence-transformers
 rank-bm25
+
+# Spark and Delta Lake (local development)
+pyspark>=3.5.0,<4.0.0
+delta-spark>=3.0.0,<4.0.0
+pyarrow>=14.0.0
