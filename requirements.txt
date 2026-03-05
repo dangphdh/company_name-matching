@@ -12,6 +12,7 @@ beautifulsoup4
 requests
 sentence-transformers
 rank-bm25
+wordllama
 
 # Spark and Delta Lake (local development)
 pyspark>=3.5.0,<4.0.0

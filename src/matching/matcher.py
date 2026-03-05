@@ -171,6 +171,17 @@ class CompanyMatcher:
             self.st_model = SentenceTransformer(
                 dense_model_name, device='cuda' if use_gpu else 'cpu'
             )
+        elif model_name == 'tfidf-wordllama' or model_name == 'hybrid-cross-lang':
+            print(f"Using Hybrid TF-IDF + WordLlama Matcher (config=m2v_multilingual)...")
+            # TF-IDF vectorizer (for fast retrieval)
+            self.vectorizer = TfidfVectorizer(
+                analyzer='char',
+                ngram_range=(2, 5),
+                sublinear_tf=True,
+                min_df=1
+            )
+            # WordLlama will be loaded in build_index()
+            self.wl = None
         elif 'wordllama' in model_name.lower():
             from wordllama import WordLlama
             print(f"Using WordLlama Matcher ({model_name})...")
@@ -289,6 +300,18 @@ class CompanyMatcher:
             else:
                 # Store processed names so cross-encoder can look up cleaned forms
                 self._processed_names = processed_names
+        elif self.model_name == 'tfidf-wordllama' or self.model_name == 'hybrid-cross-lang':
+            # Stage 1: Build TF-IDF index (sparse, fast)
+            self.corpus_vectors = self.vectorizer.fit_transform(processed_names)
+
+            # Stage 2: Build WordLlama embeddings (dense, semantic)
+            from wordllama import WordLlama
+            print(f"  Building WordLlama multilingual embeddings...")
+            self.wl = WordLlama.load_m2v(config="m2v_multilingual")
+
+            # Embed only original names (not variants) to save memory
+            self.wordllama_vectors = self.wl.embed(names)
+            print(f"  WordLlama vectors: {self.wordllama_vectors.shape}")
         elif self.model_name == 'bm25-dense':
             # Sparse: BM25
             from rank_bm25 import BM25Okapi
@@ -492,6 +515,56 @@ class CompanyMatcher:
                 dense_scores = _get_dense_scores()
                 similarities = self.sparse_weight * sparse_scores + self.dense_weight * dense_scores
 
+        elif self.model_name == 'tfidf-wordllama' or self.model_name == 'hybrid-cross-lang':
+            # ── Stage 1: TF-IDF retrieval (always run - fast!) ────────────────
+            query_vec = self.vectorizer.transform([query_cleaned])
+            tfidf_scores = cosine_similarity(query_vec, self.corpus_vectors).flatten()
+
+            # Get top 20 candidates from TF-IDF
+            tfidf_indices = np.argsort(tfidf_scores)[::-1][:20]
+
+            # Group by original company ID (deduplicate variants)
+            cand_tfidf = {}   # orig_id → best tfidf score
+            for idx in tfidf_indices:
+                oid = self.name_mapping[idx]
+                if oid not in cand_tfidf:
+                    cand_tfidf[oid] = tfidf_scores[idx]
+
+            # Convert to sorted list
+            tfidf_results = [
+                {'company_id': oid, 'score': score}
+                for oid, score in sorted(cand_tfidf.items(), key=lambda x: x[1], reverse=True)
+            ]
+
+            # ── Stage 2: Confidence check - should we rerank? ───────────────
+            need_rerank = (
+                len(tfidf_results) >= 2 and
+                (tfidf_results[0]['score'] - tfidf_results[1]['score']) < self.rerank_threshold
+            )
+
+            if need_rerank and self.wl is not None:
+                # Low confidence: Use WordLlama to rerank top-10 candidates
+                candidate_ids = [r['company_id'] for r in tfidf_results[:10]]
+                candidate_names = [self.corpus_names[oid] for oid in candidate_ids]
+
+                # Embed query and candidates with WordLlama
+                query_wl = self.wl.embed([query])
+                candidates_wl = self.wordllama_vectors[candidate_ids]
+
+                # Compute semantic similarities
+                wl_scores = cosine_similarity(query_wl, candidates_wl).flatten()
+
+                # Build similarities array: -inf for non-candidates
+                similarities = np.full(len(tfidf_scores), -np.inf)
+                for idx, score in zip(candidate_ids, wl_scores):
+                    # Find all variant indices for this original company ID
+                    for var_idx, oid in enumerate(self.name_mapping):
+                        if oid == idx:
+                            similarities[var_idx] = float(score)
+            else:
+                # High confidence or reranking disabled: return TF-IDF results
+                similarities = tfidf_scores
+
         elif self.model_name == 'bm25-dense':
             # Sparse scores: BM25 normalised to 0-1
             tokenized_query = query_cleaned.split()
@@ -630,6 +703,11 @@ class CompanyMatcher:
             np.save(index_path / "dense_vectors.npy", self.dense_vectors)
             print(f"[CompanyMatcher] Saved dense vectors: {self.dense_vectors.shape}")
 
+        # Save WordLlama vectors (if using hybrid model)
+        if hasattr(self, 'wordllama_vectors') and self.wordllama_vectors is not None:
+            np.save(index_path / "wordllama_vectors.npy", self.wordllama_vectors)
+            print(f"[CompanyMatcher] Saved WordLlama vectors: {self.wordllama_vectors.shape}")
+
         # Save corpus vectors
         if self.corpus_vectors is not None:
             np.save(index_path / "corpus_vectors.npy", self.corpus_vectors)
@@ -746,6 +824,15 @@ class CompanyMatcher:
         if dense_path.exists():
             matcher.dense_vectors = np.load(dense_path)
             print(f"[CompanyMatcher] Loaded dense vectors: {matcher.dense_vectors.shape}")
+
+        # Load WordLlama vectors (if exists)
+        wl_path = index_path / "wordllama_vectors.npy"
+        if wl_path.exists():
+            from wordllama import WordLlama
+            matcher.wordllama_vectors = np.load(wl_path)
+            # Reload WordLlama model
+            matcher.wl = WordLlama.load_m2v(config="m2v_multilingual")
+            print(f"[CompanyMatcher] Loaded WordLlama vectors: {matcher.wordllama_vectors.shape}")
 
         # Load BM25 model (if exists)
         bm25_path = index_path / "bm25_model.pkl"
